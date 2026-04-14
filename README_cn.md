@@ -1,4 +1,4 @@
-🌐 Languages: 🌍 English · 🌏 简体中文 · 🇯🇵 日本語 · 🇰🇷 한국어 · 🇻🇳 Tiếng Việt · 🇵🇭 Tagalog · 🇪🇸 Español · 🇵🇹 Português · 🇮🇹 Italiano · 🇩🇪 Deutsch · 🇫🇷 Français · 🇸🇦 العربية · 🇮🇳 हिन्दी · 🇷🇺 Русский · 🇧🇩 বাংলা · 🇮🇱 עברית · 🇵🇱 Polski · 🇨🇿 Čeština · 🇳🇱 Nederlands · 🇹🇷 Türkçe · 🇺🇦 Українська · 🇮🇩 Bahasa Indonesia · 🇹🇭 ไทย · 🇵🇰 اردو · 🇷🇴 Română · 🇸🇪 Svenska · 🇬🇷 Ελληνικά · 🇭🇺 Magyar · 🇫🇮 Suomi · 🇩🇰 Dansk · 🇳🇴 Norsk
+ English ·  简体中文 ·  日本語 ·  한국어 ·  Tiếng Việt ·  Tagalog ·  Español ·  Português ·  Italiano ·  Deutsch ·  Français ·  العربية ·  हिन्दी ·  Русский ·  বাংলা ·  עברית ·  Polski ·  Čeština ·  Nederlands ·  Türkçe ·  Українська ·  Bahasa Indonesia ·  ไทย ·  اردو ·  Română ·  Svenska ·  Ελληνικά ·  Magyar ·  Suomi ·  Dansk ·  Norsk
 
 # 🚀 llama.cpp TurboQuant Limit Breaker (Gemma 4 & Qwopus Ready)
 
