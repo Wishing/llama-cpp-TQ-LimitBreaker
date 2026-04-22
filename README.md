@@ -9,12 +9,13 @@
 
 打破 24G 显存的物理法则：在单张 RTX 3090 上，以 100% GPU 满血卸载运行 Gemma-4-31B / Qwopus-27B，并维持 96K - 256K 超大上下文。
 
-## 🔍 为什么会有这个项目？
+## 🔍 为什么会有这个项目？ (The Motivation)
 
-截止 2026 年 4 月，开源 AI 社区的本地部署面临一个“死局”：
-1. **官方进度滞后**：官方 `llama.cpp` 主线迟迟未将 TurboQuant 算子 (`tbqp3_0`) 原生并入 CUDA。
-2. **深度适配混合架构**：本补丁特别加强了对 **Gemma 4** 系列以及 **Qwen/Qwopus** 变体（如 **Qwopus-GLM-Heretic-27B-dare-ties**）的支持，完美兼容其最新的 SWA (滑动窗口) / ISWA 混合缓存。
-3. **Agent 工作流优化**：解决在使用 AI IDE 时超长 Prompt 导致的预填充超时和服务器“死亡循环”。
+在本地大模型（LLM）领域，**Gemma 4** 和 **Qwopus** 的出现标志着 30B 级别模型已经拥有了超越以往 70B 模型的逻辑能力。然而，开发者面临着官方支持的“技术断层”：
+
+1.  **官方 TurboQuant 缺失**：尽管 `llama.cpp` 社区有关于 TurboQuant 的讨论，但其核心 CUDA 算子（尤其是针对 Key 缓存的 `tbqp` 系列）在最新主线中仍未合并。这意味着官方版本无法在 CUDA 上享受 3-bit KV 压缩带来的显存红利。
+2.  **Gemma 4 适配荒原**：Gemma 4 采用了极其复杂的 **SWA (滑动窗口) + ISWA (独立滑动窗口)** 混合缓存机制。目前官方主线在处理此类混合架构时，无法直接应用 TurboQuant 量化，会导致严重的精度崩坏或运行时内存对齐错误。
+3.  **DFlash 的必然性**：在超长上下文（100K+）下，传统的投机采样（如 Eagle3）会产生巨大的额外 KV 显存占用，导致“为了加速而爆显存”。**DFlash** 是专为此补丁设计的轻量化投机引擎，它与 TurboQuant 算子深度融合，在维持极低显存占用的同时，通过预测机制抵消了量化带来的微小延迟增加。
 
 ---
 
@@ -71,21 +72,25 @@
 
 ---
 
-#### 💡 完整运行示例 (Full Examples)
+#### 💡 极客极限配置示例 (Ultimate Geek Examples)
 
-##### A. 极限上下文模式：Gemma-4-31B (单卡 3090 运行 128K 上下文)
-此配置利用 **TurboQuant 3-bit** 压缩，将原本需要 60G+ 显存的 128K KV Cache 压缩至约 15G，从而在 24G 显卡上全量运行。
+##### 🌟【终极方案】Gemma-4-31B 满血全量：256K 极限上下文 + DFlash 加速
+这是本项目的“存在意义”：在单张 RTX 3090/4090 上，运行原本需要 4x A100 才能支撑的 256K 窗口，并保持丝滑的打字机速度。
+- **显存压缩**：3-bit TurboQuant 将 KV 占用从 ~120GB 压缩至 ~28GB（配合系统内存共享）。
+- **推理加速**：DFlash 投机采样抵消预填充延迟。
 
 ```bash
 ./build/bin/llama-server \
     -m models/gemma-4-31b-it-UD-IQ3_XXS.gguf \
-    -c 131072 -b 1024 -ub 512 -ngl 99 -fa \
+    -md models/gemma-4-dflash-draft.gguf \
+    --dflash \
+    -c 262144 -b 2048 -ub 1024 -ngl 99 -fa \
     -ctk tbqp3 -ctv tbq3 \
     --port 1337
 ```
 
-##### B. 极速推理模式：Qwopus-27B + DFlash 投机加速
-此配置同时开启了 **4-bit KV 压缩**（兼顾精度与显存）与 **DFlash 投机采样**，推理速度通常可提升 1.5x - 2x。
+##### ⚡【极限速度】Qwopus-27B：100K 窗口下的“秒回”体验
+针对 Qwen 架构优化的极致吞吐配置。
 
 ```bash
 ./build/bin/llama-server \

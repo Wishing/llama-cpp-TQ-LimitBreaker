@@ -9,12 +9,13 @@
 
 > **Breaking the Physical Laws of 24GB VRAM: Run Gemma-4-31B / Qwopus-27B with 100% GPU full offload on a single RTX 3090, while maintaining 96K - 256K massive context.**
 
-## 🔍 Why this project?
+## 🔍 Why this project? (The Motivation)
 
-As of April 2026, the local deployment of the open-source AI community faces a "deadlock":
-1. **Official Lag**: The official `llama.cpp` mainline has not natively integrated TurboQuant operators (`tbqp3_0`) into CUDA.
-2. **Advanced Hybrid Support**: This patch provides deep support for the **Gemma 4** series and latest **Qwopus** variants (e.g., **Qwopus-GLM-Heretic-27B-dare-ties**), which utilize the latest SWA (Sliding Window) / ISWA hybrid cache architecture.
-3. **Optimized for Agentic Workflows**: Prevents prefill latency timeouts and server "death loops" when used with modern AI IDEs.
+In the era of local LLMs, **Gemma 4** and **Qwopus** represent a breakthrough where 30B-class models outperform previous 70B giants. However, developers face a significant "technical gap" in official support:
+
+1.  **Missing TurboQuant Kernels**: While discussed in the community, the core CUDA kernels for TurboQuant (especially the `tbqp` series for Key cache) have not been merged into the official `llama.cpp` mainline. This means official builds cannot benefit from the ~75% KV VRAM savings.
+2.  **Gemma 4 Hybrid Cache Support**: Gemma 4 utilizes a sophisticated **SWA (Sliding Window) + ISWA (Independent SWA)** hybrid cache mechanism. The official mainline currently cannot apply TurboQuant to these hybrid layers correctly, leading to massive perplexity degradation or runtime crashes.
+3.  **Necessity of DFlash**: At extreme context lengths (100K+), traditional speculative engines like Eagle3 incur significant VRAM overhead, often causing "OOM for the sake of speed." **DFlash** is a lightweight engine specifically tuned for this patch, deeply integrated with TurboQuant operators to provide acceleration without bloated VRAM usage.
 
 ---
 
@@ -70,21 +71,25 @@ This patch introduces two core technologies: **TurboQuant (KV Compression)** and
 
 ---
 
-#### 💡 Full Usage Examples
+#### 💡 Ultimate Geek Configurations
 
-##### A. Extreme Context Mode: Gemma-4-31B (128K Context on Single 3090)
-This configuration uses **TurboQuant 3-bit** compression to squeeze 128K KV Cache (originally 60GB+) into ~15GB, enabling full offload on a 24GB card.
+##### 🌟【The Final Solution】Gemma-4-31B Full Offload: 256K Context + DFlash
+The raison d'être of this project: Run a 256K window on a single RTX 3090/4090, a workload that normally requires 4x A100s, while maintaining smooth typing speeds.
+- **VRAM Compression**: 3-bit TurboQuant compresses KV cache from ~120GB to ~28GB (enabled via unified memory sharing).
+- **Inference Speed**: DFlash speculative sampling offsets prefill/quantization latency.
 
 ```bash
 ./build/bin/llama-server \
     -m models/gemma-4-31b-it-UD-IQ3_XXS.gguf \
-    -c 131072 -b 1024 -ub 512 -ngl 99 -fa \
+    -md models/gemma-4-dflash-draft.gguf \
+    --dflash \
+    -c 262144 -b 2048 -ub 1024 -ngl 99 -fa \
     -ctk tbqp3 -ctv tbq3 \
     --port 1337
 ```
 
-##### B. High-Speed Inference: Qwopus-27B + DFlash Acceleration
-This configuration combines **4-bit KV compression** (balancing accuracy and VRAM) with **DFlash speculative sampling**, typically yielding 1.5x - 2x speedup.
+##### ⚡【Maximum Speed】Qwopus-27B: Instant Response at 100K Context
+Ultra-throughput configuration optimized for Qwen-based architectures.
 
 ```bash
 ./build/bin/llama-server \
