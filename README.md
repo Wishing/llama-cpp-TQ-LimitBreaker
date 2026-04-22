@@ -12,28 +12,29 @@
 ## 🔍 Why this project?
 
 As of April 2026, the local deployment of the open-source AI community faces a "deadlock":
-1. **Official Lag**: The official `llama.cpp` mainline has not natively integrated TurboQuant operators (`tbqp3_0`) into CUDA, causing 30B+ models to instantly exhaust 24GB VRAM during long-text prefill.
-2. **Community Fork Compatibility Issues**: Existing community TurboQuant branches are slow to update and cannot compatible with the latest SWA (Sliding Window) / ISWA hybrid cache architecture introduced in Gemma 4, leading to `GGML_ASSERT` or segmentation faults.
-3. **Agent Scheduling Death Loop**: When paired with AI IDEs like Claude Code, ZeroClaw, or Google Antigravity, the prefill latency of ultra-long prompts easily triggers client timeout retries, causing the server to fall into a high-power idle death loop of frantic `cancel task`.
-
-**This project provides a purified limit patch (`llama_turboquant.patch`).** It precisely injects the core TurboQuant rotation compression operators into the latest official mainline code, manually resolving C++ source conflicts and memory alignment errors, perfectly bypassing the crash red lines.
+1. **Official Lag**: The official `llama.cpp` mainline has not natively integrated TurboQuant operators (`tbqp3_0`) into CUDA.
+2. **Advanced Hybrid Support**: This patch provides deep support for the **Gemma 4** series and latest **Qwopus** variants (e.g., **Qwopus-GLM-Heretic-27B-dare-ties**), which utilize the latest SWA (Sliding Window) / ISWA hybrid cache architecture.
+3. **Optimized for Agentic Workflows**: Prevents prefill latency timeouts and server "death loops" when used with modern AI IDEs.
 
 ---
 
-## 📊 Extreme Performance Benchmarks
+## 📊 Supported & Tested Models
 
-- **Hardware**: Single NVIDIA GeForce RTX 3090 (24GB VRAM)
-- **Models**: `Gemma-4-31B-It-UD-IQ3_XXS.gguf` / `Qwopus3.5-27B-v3-Q4_K_M.gguf`
-- **VRAM Optimization**: 
-  - 98,304 (96K) context initialized, VRAM usage locked at **23,644 MiB / 24,576 MiB**.
-  - KV Cache (K+V) compressed from >6GB to **~1.48 GB**.
-- **Generation Speed (Decode)**: Full `-ngl 99` acceleration, stable output at **~16.5 tokens/s**.
+This patch is heavily optimized and tested for:
+- **Gemma 4 Series**: Fully supports SWA/ISWA hybrid cache alignment. 
+  - *Tested: Gemma-4-31B-It-UD-IQ3_XXS.gguf*
+- **Qwopus Variants**: Optimized for Qwen2-based architectures.
+  - *Tested: Qwopus-GLM-Heretic-27B-dare-ties.gguf*
+  - *Tested: Qwopus3.5-27B-v3*
+- **Extreme VRAM Savings**: 
+  - **Gemma-4-31B** + **96K Context** = **~23.6 GB VRAM** (Single 3090/4090).
+  - KV Cache reduction: **75% Compression Ratio**.
 
 ---
 
 ## 🛠️ Build & Injection Guide
 
-To ensure the patch is applied perfectly and to avoid compilation errors from upstream API changes, **please strictly lock your repository to the tested specific commit version**.
+To ensure the patch is applied perfectly, **please strictly lock your repository to the tested specific commit version**.
 
 ### 1. Prepare Repository & Lock Version
 1. Clone the official llama.cpp repository:
@@ -54,17 +55,22 @@ To ensure the patch is applied perfectly and to avoid compilation errors from up
    cmake --build build --config Release -j $(nproc) --target llama-server
    ```
 
-### 2. Run Example
+### 2. Run Examples
+
+#### A. Running Gemma-4-31B (96K Context on Single 3090)
 ```bash
 ./build/bin/llama-server \
     -m /path/to/gemma-4-31B-it-UD-IQ3_XXS.gguf \
-    -c 98304 \
-    -b 1024 -ub 512 \
-    -ngl 99 \
-    -fa \
+    -c 98304 -b 1024 -ub 512 -ngl 99 -fa \
     -ctk tbqp3_0 -ctv tbq3_0 \
-    --parallel 1 \
-    --no-prompt-cache \
-    --timeout 3600 \
+    --port 1337
+```
+
+#### B. Running Qwopus-27B Heretic (Ultra-Long Context)
+```bash
+./build/bin/llama-server \
+    -m /path/to/Qwopus-GLM-Heretic-27B-dare-ties.gguf \
+    -c 131072 -b 1024 -ub 512 -ngl 99 -fa \
+    -ctk tbqp3_0 -ctv tbq3_0 \
     --port 1337
 ```
