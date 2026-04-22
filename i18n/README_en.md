@@ -4,8 +4,8 @@
 
 > [!CAUTION]
 > **CRITICAL: VERSION MISMATCH WILL CAUSE COMPILATION FAILURE OR RUNTIME CRASH.**
-> This patch is strictly designed for **llama.cpp commit `ca7f7b7b`**. Applying it to any other version (newer or older) will likely result in manual conflict resolution failures or memory alignment errors.
-> **DO NOT** attempt to apply this patch without first running `git checkout ca7f7b7b`.
+> This patch is strictly designed for **llama.cpp commit `82d3f4d3`**. Applying it to any other version (newer or older) will likely result in manual conflict resolution failures or memory alignment errors.
+> **DO NOT** attempt to apply this patch without first running `git checkout 82d3f4d3`.
 
 > **Breaking the Physical Laws of 24GB VRAM: Run Gemma-4-31B / Qwopus-27B with 100% GPU full offload on a single RTX 3090, while maintaining 96K - 256K massive context.**
 
@@ -45,7 +45,7 @@ To ensure the patch is applied perfectly, **please strictly lock your repository
    ```
 2. **MUST** lock to this safe version (Validated Commit):
    ```bash
-   git checkout ca7f7b7b
+   git checkout 82d3f4d3
    ```
 3. Copy the `llama_turboquant.patch` file from this project into the `llama.cpp` root directory.
 

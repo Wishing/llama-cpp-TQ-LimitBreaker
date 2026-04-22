@@ -4,8 +4,8 @@
 
 > [!CAUTION]
 > **重要提示：版本不匹配会导致编译失败或运行时崩溃。**
-> 本补丁严格针对 **llama.cpp commit `ca7f7b7b`** 设计。将其应用于任何其他版本（无论新旧）都可能导致手动冲突解决失败或内存对齐错误。
-> **在运行 `git checkout ca7f7b7b` 之前，请勿尝试应用此补丁。**
+> 本补丁严格针对 **llama.cpp commit `82d3f4d3`** 设计。将其应用于任何其他版本（无论新旧）都可能导致手动冲突解决失败或内存对齐错误。
+> **在运行 `git checkout 82d3f4d3` 之前，请勿尝试应用此补丁。**
 
 打破 24G 显存的物理法则：在单张 RTX 3090 上，以 100% GPU 满血卸载运行 Gemma-4-31B / Qwopus-27B，并维持 96K - 256K 超大上下文。
 
@@ -46,7 +46,7 @@
    ```
 2. **必须**锁定到此安全版本 (Validated Commit)：
    ```bash
-   git checkout ca7f7b7b
+   git checkout 82d3f4d3
    ```
 3. 将本项目中的 `llama_turboquant.patch` 文件复制到 `llama.cpp` 的根目录下。
 
