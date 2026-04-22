@@ -1,0 +1,2827 @@
+diff --git a/common/arg.cpp b/common/arg.cpp
+index 85d84e5cc..70d90f973 100644
+--- a/common/arg.cpp
++++ b/common/arg.cpp
+@@ -3087,7 +3087,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+         [](common_params & params, bool value) {
+             params.use_jinja = value;
+         }
+-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_MTMD}).set_env("LLAMA_ARG_JINJA"));
++    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_MTMD, LLAMA_EXAMPLE_SPECULATIVE}).set_env("LLAMA_ARG_JINJA"));
+     add_opt(common_arg(
+         {"--reasoning-format"}, "FORMAT",
+         "controls whether thought tags are allowed and/or extracted from the response, and in which format they're returned; one of:\n"
+@@ -3143,7 +3143,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+         [](common_params & params, const std::string & value) {
+             params.chat_template = value;
+         }
+-    ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_MTMD}).set_env("LLAMA_ARG_CHAT_TEMPLATE"));
++    ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_MTMD, LLAMA_EXAMPLE_SPECULATIVE}).set_env("LLAMA_ARG_CHAT_TEMPLATE"));
+     add_opt(common_arg(
+         {"--chat-template-file"}, "JINJA_TEMPLATE_FILE",
+         string_format(
+@@ -3467,6 +3467,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+             params.speculative.p_min = std::stof(value);
+         }
+     ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_DRAFT_P_MIN"));
++    add_opt(common_arg(
++        {"--eagle3"},
++        "use EAGLE3 speculative decoding with the draft model",
++        [](common_params & params) {
++            params.speculative.eagle3 = true;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--dflash"},
++        "use DFlash speculative decoding with the draft model",
++        [](common_params & params) {
++            params.speculative.dflash = true;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_CLI}));
+     add_opt(common_arg(
+         {"-cd", "--ctx-size-draft"}, "N",
+         string_format("size of the prompt context for the draft model (default: %d, 0 = loaded from model)", params.speculative.n_ctx),
+diff --git a/common/common.h b/common/common.h
+index 9a8218433..b6680df1b 100644
+--- a/common/common.h
++++ b/common/common.h
+@@ -159,6 +159,7 @@ enum common_speculative_type {
+     COMMON_SPECULATIVE_TYPE_NONE,          // no speculative decoding
+     COMMON_SPECULATIVE_TYPE_DRAFT,         // draft model
+     COMMON_SPECULATIVE_TYPE_EAGLE3,        // eagle draft model
++    COMMON_SPECULATIVE_TYPE_DFLASH,        // dflash draft model
+     COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE,  // simple self-speculative decoding
+     COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K,   // self-speculative decoding with n-gram keys only
+     COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V, // self-speculative decoding with n-gram keys and 4 m-gram values
+@@ -322,10 +323,14 @@ struct common_params_speculative {
+ 
+     struct common_params_model mparams_dft;
+ 
++    llama_model * model_tgt = nullptr; // the target model
+     llama_model * model_dft = nullptr; // a llama_model that can be shared by multiple speculative contexts
+ 
+     llama_context_params cparams_dft; // these are the parameters for the draft llama_context
+ 
++    bool    eagle3       = false; // use EAGLE3 speculative decoding
++    bool    dflash       = false; // use DFlash speculative decoding
++
+     int32_t n_ctx        = 0;  // draft context size
+     int32_t n_gpu_layers = -1; // number of layers to store in VRAM for the draft model (-1 - use default)
+ 
+diff --git a/common/speculative.cpp b/common/speculative.cpp
+index 20e38bec4..4980c03da 100644
+--- a/common/speculative.cpp
++++ b/common/speculative.cpp
+@@ -22,6 +22,7 @@ const std::vector<enum common_speculative_type> common_speculative_types = {
+     COMMON_SPECULATIVE_TYPE_NONE,
+     COMMON_SPECULATIVE_TYPE_DRAFT,
+     COMMON_SPECULATIVE_TYPE_EAGLE3,
++    COMMON_SPECULATIVE_TYPE_DFLASH,
+     COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE,
+     COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K,
+     COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V,
+@@ -33,6 +34,7 @@ const std::map<std::string, enum common_speculative_type> common_speculative_typ
+     {"none",          COMMON_SPECULATIVE_TYPE_NONE},
+     {"draft",         COMMON_SPECULATIVE_TYPE_DRAFT},
+     {"eagle3",        COMMON_SPECULATIVE_TYPE_EAGLE3},
++    {"dflash",        COMMON_SPECULATIVE_TYPE_DFLASH},
+     {"ngram_simple",  COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE},
+     {"ngram_map_k",   COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K},
+     {"ngram_map_k4v", COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V},
+@@ -48,6 +50,7 @@ struct common_speculative_config {
+             const common_params_speculative & p = common_params_speculative{}) : type(t), params(p) {}
+ };
+ 
++
+ static bool common_speculative_are_compatible(
+     const llama_model * model_tgt,
+     const llama_model * model_dft) {
+@@ -231,7 +234,9 @@ struct common_speculative_state_draft : public common_speculative_state {
+     ~common_speculative_state_draft() override {
+         llama_perf_context_print(ctx_dft);
+ 
+-        llama_free(ctx_dft);
++        if (ctx_dft) {
++            llama_free(ctx_dft);
++        }
+ 
+         common_sampler_free(smpl);
+ 
+@@ -290,11 +295,11 @@ struct common_speculative_state_draft : public common_speculative_state {
+             llama_tokens & result) override {
+         auto * spec = this;
+ 
+-        auto & batch      = spec->batch;
+-        auto & ctx_tgt    = spec->ctx_tgt;
+-        auto & ctx_dft    = spec->ctx_dft;
+-        auto & smpl       = spec->smpl;
+-        auto & prompt_dft = spec->prompt_dft;
++        auto & batch       = spec->batch;
++        auto & ctx_tgt     = spec->ctx_tgt;
++        auto & ctx_dft     = spec->ctx_dft;
++        auto & smpl        = spec->smpl;
++        auto & prompt_dft  = spec->prompt_dft;
+ 
+         auto * mem_dft = llama_get_memory(ctx_dft);
+ 
+@@ -551,7 +556,52 @@ struct common_speculative_state_draft : public common_speculative_state {
+ };
+ 
+ struct common_speculative_state_eagle3 : public common_speculative_state {
+-    common_speculative_state_eagle3(enum common_speculative_type type) : common_speculative_state(type) {}
++    llama_context * ctx_tgt;
++
++    common_sampler * smpl;
++
++    llama_batch batch;
++
++    struct llama_context * ctx_dft_enc = nullptr;
++    struct llama_context * ctx_dft_dec = nullptr;
++
++    int32_t eagle3_n_past = 0;  // number of verified positions in decoder KV cache
++
++    common_speculative_state_eagle3(
++            enum common_speculative_type type,
++            llama_context * ctx_tgt,
++            llama_context * ctx_dft_enc,
++            llama_context * ctx_dft_dec)
++        : common_speculative_state(type)
++        , ctx_tgt(ctx_tgt)
++        , ctx_dft_enc(ctx_dft_enc)
++        , ctx_dft_dec(ctx_dft_dec)
++    {
++        batch = llama_batch_init(llama_n_batch(ctx_dft_dec), 0, 1);
++
++        // Initialize sampler for EAGLE3 decoder
++        common_params_sampling params;
++        params.no_perf = false;
++        params.top_k = 10; // set 1 for greedy sampling (argmax) to match vLLM's default behavior but >1 always gets higher acceptance rate for eagle3
++        params.samplers = { COMMON_SAMPLER_TYPE_TOP_K };
++        smpl = common_sampler_init(llama_get_model(ctx_dft_dec), params);
++    }
++
++    ~common_speculative_state_eagle3() override {
++        llama_perf_context_print(ctx_dft_dec);
++
++        if (ctx_dft_dec) {
++            llama_free(ctx_dft_dec);
++        }
++
++        if (ctx_dft_enc) {
++            llama_free(ctx_dft_enc);
++        }
++
++        common_sampler_free(smpl);
++
++        llama_batch_free(batch);
++    }
+ 
+     void begin(const llama_tokens & prompt) override {
+         GGML_UNUSED(prompt);
+@@ -561,12 +611,97 @@ struct common_speculative_state_eagle3 : public common_speculative_state {
+             const common_params_speculative & params,
+             const llama_tokens & prompt_tgt,
+             llama_token id_last,
+-            llama_tokens & draft_tokens) override {
+-        // TODO: implement
+-        GGML_UNUSED(params);
+-        GGML_UNUSED(prompt_tgt);
+-        GGML_UNUSED(id_last);
+-        GGML_UNUSED(draft_tokens);
++            llama_tokens & result) override {
++        auto * spec = this;
++
++        auto & batch       = spec->batch;
++        auto & ctx_tgt     = spec->ctx_tgt;
++        auto & ctx_dft_enc = spec->ctx_dft_enc;
++        auto & ctx_dft_dec = spec->ctx_dft_dec;
++        auto & smpl        = spec->smpl;
++
++        //result = gen_eagle3_draft(spec, params, prompt_tgt, id_last);
++        const int n_embd = llama_model_n_embd(llama_get_model(ctx_dft_enc));
++        const int n      = (int)prompt_tgt.size();
++        const int n_new  = n - spec->eagle3_n_past;
++
++        GGML_ASSERT(n >= 1 && "prompt_tgt is empty");
++        GGML_ASSERT(n_new >= 1 && "must have at least 1 new token");
++
++        // Clear draft positions from decoder KV cache [n_past, inf)
++        llama_memory_seq_rm(llama_get_memory(ctx_dft_dec), 0, spec->eagle3_n_past, -1);
++
++        // Encoder: features → g_embeddings
++        const float * features = llama_get_eagle3_target_features(ctx_tgt);
++        GGML_ASSERT(features && "no target features");
++
++        llama_batch enc_batch = {
++            /*.n_tokens  =*/ n_new,
++            /*.token     =*/ nullptr,
++            /*.embd      =*/ const_cast<float*>(features),
++            /*.pos       =*/ nullptr,
++            /*.n_seq_id  =*/ nullptr,
++            /*.seq_id    =*/ nullptr,
++            /*.logits    =*/ nullptr,
++        };
++        GGML_ASSERT(llama_encode(ctx_dft_enc, enc_batch) == 0);
++
++        const float * g_embd = llama_get_embeddings(ctx_dft_enc);
++        GGML_ASSERT(g_embd && "encoder output failed");
++
++        // Decoder batch: process new tokens with KV cache reuse
++        llama_set_eagle3_g_embeddings(ctx_dft_dec, g_embd, n_embd, n_new);
++
++        common_batch_clear(batch);
++        for (int i = 0; i < n_new; i++) {
++            const int pos = spec->eagle3_n_past + i;
++            const llama_token tok = (pos < n - 1) ? prompt_tgt[pos + 1] : id_last;
++            common_batch_add(batch, tok, pos, {0}, true);
++        }
++
++        GGML_ASSERT(llama_decode(ctx_dft_dec, batch) == 0);
++
++        spec->eagle3_n_past = n;  // update verified positions
++
++        // Sample draft tokens
++        result.clear();
++        common_sampler_reset(smpl);
++
++        // Sample and check probability (consistent with standard speculative decoding)
++        auto sample_and_check = [&](int idx) -> bool {
++            common_sampler_sample(smpl, ctx_dft_dec, idx);
++
++            const auto * cur_p = common_sampler_get_candidates(smpl, true);
++            const llama_token id = cur_p->data[0].id;
++
++            common_sampler_accept(smpl, id, true);
++            result.push_back(id);
++
++            return cur_p->data[0].p >= params.p_min;
++        };
++
++        // First draft token from batch decode
++        if (!sample_and_check(n_new - 1)) {
++            return;
++        }
++
++        // Autoregressive: use prenorm as g_embd (-1 = last output)
++        const float * prenorm = llama_get_embeddings_ith(ctx_dft_dec, -1);
++
++        for (int i = 1; i < params.n_max; i++) {
++            GGML_ASSERT(prenorm && "prenorm failed");
++            llama_set_eagle3_g_embeddings(ctx_dft_dec, prenorm, n_embd, 1);
++
++            common_batch_clear(batch);
++            common_batch_add(batch, result.back(), n - 1 + i, {0}, true);
++            GGML_ASSERT(llama_decode(ctx_dft_dec, batch) == 0);
++
++            prenorm = llama_get_embeddings_ith(ctx_dft_dec, -1);
++
++            if (!sample_and_check(0)) {
++                break;
++            }
++        }
+     }
+ 
+     void accept(uint16_t n_accepted) override {
+@@ -575,6 +710,139 @@ struct common_speculative_state_eagle3 : public common_speculative_state {
+     }
+ };
+ 
++struct common_speculative_state_dflash : public common_speculative_state {
++    llama_context * ctx_tgt;
++
++    common_sampler * smpl;
++
++    llama_batch batch;
++
++    struct llama_context * ctx_dft_enc = nullptr;
++    struct llama_context * ctx_dft_dec = nullptr;
++
++    int32_t dflash_n_past = 0;
++
++    // Host-side buffer: accumulated DFlash-encoded target features across all
++    // committed prompt+drafted tokens. Grows by `n_new * n_embd` floats per draft step
++    // and is fed to the DFlash decoder via llama_set_dflash_accumulated_target_ctx()
++    std::vector<float> accumulated_ctx;
++
++    common_speculative_state_dflash(
++            enum common_speculative_type type,
++            llama_context * ctx_tgt,
++            llama_context * ctx_dft_enc,
++            llama_context * ctx_dft_dec)
++        : common_speculative_state(type)
++        , ctx_tgt(ctx_tgt)
++        , ctx_dft_enc(ctx_dft_enc)
++        , ctx_dft_dec(ctx_dft_dec)
++    {
++        batch = llama_batch_init(llama_n_batch(ctx_dft_dec), 0, 1);
++
++        common_params_sampling params;
++        params.no_perf = false;
++        params.top_k = 1;
++        params.samplers = { COMMON_SAMPLER_TYPE_TOP_K };
++        smpl = common_sampler_init(llama_get_model(ctx_dft_dec), params);
++    }
++
++    ~common_speculative_state_dflash() override {
++        llama_perf_context_print(ctx_dft_dec);
++
++        if (ctx_dft_dec) {
++            llama_free(ctx_dft_dec);
++        }
++
++        if (ctx_dft_enc) {
++            llama_free(ctx_dft_enc);
++        }
++
++        common_sampler_free(smpl);
++        llama_batch_free(batch);
++    }
++
++    void begin(const llama_tokens & prompt) override {
++        GGML_UNUSED(prompt);
++    }
++
++    void draft(
++            const common_params_speculative & params,
++            const llama_tokens & prompt_tgt,
++            llama_token id_last,
++            llama_tokens & result) override {
++        const int n_embd           = llama_model_n_embd(llama_get_model(ctx_dft_dec));
++        // block_size is bounded by the model's trained block_size (from GGUF metadata).
++        const int model_block_size = llama_model_dflash_block_size(llama_get_model(ctx_dft_dec));
++        const int block_size       = std::min((int)params.n_max, model_block_size);
++        const int n                = (int)prompt_tgt.size();
++        const int n_new            = n - dflash_n_past;
++
++        GGML_ASSERT(n >= 1 && "prompt_tgt is empty");
++        GGML_ASSERT(n_new >= 1 && "must have at least 1 new token");
++
++        // Step 1: Encode new accepted tokens' features
++        const float * features = llama_get_dflash_target_features(ctx_tgt);
++
++        llama_batch enc_batch = {
++            /*.n_tokens  =*/ n_new,
++            /*.token     =*/ nullptr,
++            /*.embd      =*/ const_cast<float*>(features),
++            /*.pos       =*/ nullptr,
++            /*.n_seq_id  =*/ nullptr,
++            /*.seq_id    =*/ nullptr,
++            /*.logits    =*/ nullptr,
++        };
++        if (llama_encode(ctx_dft_enc, enc_batch) != 0) {
++            LOG_ERR("DFlash: encoder failed\n");
++            return;
++        }
++
++        const float * target_ctx_new = llama_get_embeddings(ctx_dft_enc);
++        GGML_ASSERT(target_ctx_new && "encoder output is null");
++
++        // Step 2: Append to accumulated target_ctx and set on decoder context (writes to cross.v_embd)
++        const size_t new_size = (size_t)n_embd * n_new;
++        accumulated_ctx.insert(accumulated_ctx.end(), target_ctx_new, target_ctx_new + new_size);
++
++        const int n_ctx_total = (int)(accumulated_ctx.size() / n_embd);
++        llama_set_dflash_accumulated_target_ctx(ctx_dft_dec, accumulated_ctx.data(), n_embd, n_ctx_total);
++
++        // Step 3: Decode noise block
++        const llama_token mask_token_id = llama_model_dflash_mask_token_id(llama_get_model(ctx_dft_dec));
++
++        common_batch_clear(batch);
++        for (int i = 0; i < block_size; i++) {
++            const llama_token tok = (i == 0) ? id_last : mask_token_id;
++            common_batch_add(batch, tok, i, {0}, true);
++        }
++
++        if (llama_decode(ctx_dft_dec, batch) != 0) {
++            LOG_ERR("DFlash: noise decode failed\n");
++            return;
++        }
++
++        dflash_n_past = n;
++
++        // Step 4: Sample draft tokens from positions 1..block_size-1
++        result.clear();
++        common_sampler_reset(smpl);
++
++        for (int i = 1; i < block_size; i++) {
++            common_sampler_sample(smpl, ctx_dft_dec, i);
++
++            const auto * cur_p = common_sampler_get_candidates(smpl, true);
++            const llama_token id = cur_p->data[0].id;
++
++            common_sampler_accept(smpl, id, true);
++            result.push_back(id);
++        }
++    }
++
++    void accept(uint16_t n_accepted) override {
++        GGML_UNUSED(n_accepted);
++    }
++};
++
+ // state of self-speculation (simple implementation, not ngram-map)
+ struct common_speculative_state_ngram_simple : public common_speculative_state {
+     common_ngram_simple_config config;
+@@ -919,11 +1187,35 @@ common_speculative * common_speculative_init(
+         common_params_speculative & params,
+         llama_context             * ctx_tgt) {
+     llama_context * ctx_dft = nullptr;
++
++    llama_context * ctx_dft_enc = nullptr;
++    llama_context * ctx_dft_dec = nullptr;
++
+     if (params.model_dft) {
+-        ctx_dft = llama_init_from_model(params.model_dft, params.cparams_dft);
+-        if (ctx_dft == nullptr) {
+-            LOG_ERR("%s", "failed to create draft context\n");
+-            return nullptr;
++        if (params.eagle3 || params.dflash) {
++            llama_context_params params_enc = params.cparams_dft;
++            params_enc.target_model = nullptr;
++            params_enc.embeddings = true;
++            ctx_dft_enc = llama_init_from_model(params.model_dft, params_enc);
++            if (!ctx_dft_enc) {
++                LOG_ERR("failed to create %s draft model encoder context\n", params.eagle3 ? "EAGLE3" : "DFlash");
++                return nullptr;
++            }
++
++            llama_context_params params_dec = params.cparams_dft;
++            params_dec.target_model = params.model_tgt;
++            params_dec.embeddings = true;
++            ctx_dft_dec = llama_init_from_model(params.model_dft, params_dec);
++            if (!ctx_dft_dec) {
++                LOG_ERR("failed to create %s draft model decoder context\n", params.eagle3 ? "EAGLE3" : "DFlash");
++                return nullptr;
++            }
++        } else {
++            ctx_dft = llama_init_from_model(params.model_dft, params.cparams_dft);
++            if (ctx_dft == nullptr) {
++                LOG_ERR("failed to create draft model context\n");
++                return nullptr;
++            }
+         }
+     }
+ 
+@@ -931,7 +1223,8 @@ common_speculative * common_speculative_init(
+     std::vector<common_speculative_config> configs = {}; // list of speculative configs to try
+     {
+         bool has_draft = !params.mparams_dft.path.empty();
+-        bool has_draft_eagle3 = false; // TODO PR-18039: if params.speculative.eagle3
++        bool has_draft_eagle3 = params.eagle3;
++        bool has_draft_dflash = params.dflash;
+ 
+         bool has_ngram_cache   = (params.type == COMMON_SPECULATIVE_TYPE_NGRAM_CACHE);
+         bool has_ngram_simple  = (params.type == COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE);
+@@ -972,10 +1265,13 @@ common_speculative * common_speculative_init(
+             configs.push_back(common_speculative_config(COMMON_SPECULATIVE_TYPE_NGRAM_CACHE, params));
+         }
+         if (has_draft) {
+-            configs.push_back(common_speculative_config(COMMON_SPECULATIVE_TYPE_DRAFT, params));
+-        }
+-        if (has_draft_eagle3) {
+-            configs.push_back(common_speculative_config(COMMON_SPECULATIVE_TYPE_EAGLE3, params));
++            if (has_draft_eagle3) {
++                configs.push_back(common_speculative_config(COMMON_SPECULATIVE_TYPE_EAGLE3, params));
++            } else if (has_draft_dflash) {
++                configs.push_back(common_speculative_config(COMMON_SPECULATIVE_TYPE_DFLASH, params));
++            } else {
++                configs.push_back(common_speculative_config(COMMON_SPECULATIVE_TYPE_DRAFT, params));
++            }
+         }
+     }
+ 
+@@ -998,7 +1294,19 @@ common_speculative * common_speculative_init(
+                 break;
+             }
+             case COMMON_SPECULATIVE_TYPE_EAGLE3: {
+-                impls.push_back(std::make_unique<common_speculative_state_eagle3>(config.type));
++                impls.push_back(std::make_unique<common_speculative_state_eagle3>(config.type,
++                    /* .ctx_tgt      = */ ctx_tgt,
++                    /* .ctx_dft_enc  = */ ctx_dft_enc,
++                    /* .ctx_dft_dec  = */ ctx_dft_dec
++                ));
++                break;
++            }
++            case COMMON_SPECULATIVE_TYPE_DFLASH: {
++                impls.push_back(std::make_unique<common_speculative_state_dflash>(config.type,
++                    /* .ctx_tgt      = */ ctx_tgt,
++                    /* .ctx_dft_enc  = */ ctx_dft_enc,
++                    /* .ctx_dft_dec  = */ ctx_dft_dec
++                ));
+                 break;
+             }
+             case COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE: {
+diff --git a/convert_hf_to_gguf.py b/convert_hf_to_gguf.py
+index 090686b15..b9bdb37c7 100755
+--- a/convert_hf_to_gguf.py
++++ b/convert_hf_to_gguf.py
+@@ -97,6 +97,7 @@ class ModelBase:
+     metadata_override: Path | None
+     dir_model_card: Path
+     remote_hf_model_id: str | None
++    target_model_dir: Path | None
+ 
+     # subclasses should define this!
+     model_arch: gguf.MODEL_ARCH
+@@ -116,7 +117,7 @@ class ModelBase:
+                  split_max_tensors: int = 0, split_max_size: int = 0, dry_run: bool = False,
+                  small_first_shard: bool = False, hparams: dict[str, Any] | None = None, remote_hf_model_id: str | None = None,
+                  disable_mistral_community_chat_template: bool = False,
+-                 sentence_transformers_dense_modules: bool = False,
++                 sentence_transformers_dense_modules: bool = False, target_model_dir: Path | None = None,
+                  fuse_gate_up_exps: bool = False):
+         if type(self) is ModelBase or \
+                 type(self) is TextModel or \
+@@ -136,6 +137,7 @@ class ModelBase:
+         self.dry_run = dry_run
+         self.remote_hf_model_id = remote_hf_model_id
+         self.sentence_transformers_dense_modules = sentence_transformers_dense_modules
++        self.target_model_dir = target_model_dir
+         self.fuse_gate_up_exps = fuse_gate_up_exps
+         self._gate_exp_buffer: dict[int, Tensor] = {}
+         self._up_exp_buffer: dict[int, Tensor] = {}
+@@ -2809,6 +2811,9 @@ class StableLMModel(TextModel):
+     "VLlama3ForCausalLM",
+     "LlavaForConditionalGeneration",
+     "VoxtralForConditionalGeneration",
++    "LlamaForCausalLMEagle3",
++    "Eagle3Speculator",
++    "Eagle3DraftModel",
+     "IQuestCoderForCausalLM",
+     "LlamaModel")
+ class LlamaModel(TextModel):
+@@ -2823,7 +2828,60 @@ class LlamaModel(TextModel):
+         hparams = ModelBase.load_hparams(self.dir_model, is_mistral_format=False)
+         self.origin_hf_arch = hparams.get('architectures', [None])[0]
+ 
++        # detect EAGLE-3 llama checkpoint
++        if "draft_vocab_size" in self.hparams and self.hparams["num_hidden_layers"] == 1:
++            self.is_eagle3 = True
++            self.model_arch = gguf.MODEL_ARCH.EAGLE3
++            logger.info("Detected EAGLE-3 draft model, switching to EAGLE3 architecture")
++            # Re-initialize tensor_map with EAGLE3 architecture
++            self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
++            # Update gguf_writer architecture
++            self.gguf_writer.arch = gguf.MODEL_ARCH_NAMES[self.model_arch]
++            self.gguf_writer.add_architecture()
++            if not hasattr(self, 'target_model_dir') or not self.target_model_dir:
++                raise ValueError(
++                    "EAGLE3 model requires --target-model-dir to be specified. "
++                    "Please provide the path to the target model directory to read config.json"
++                )
++            # Read both EAGLE3 raw config and target model config
++            with open(self.dir_model / "config.json", 'r', encoding='utf-8') as f:
++                eagle3_raw_config = json.load(f)
++            with open(self.target_model_dir / "config.json", 'r', encoding='utf-8') as f:
++                target_config = json.load(f)
++
++            # EAGLE3 extract_layers
++            target_num_layers = target_config["num_hidden_layers"]
++            extract_layers = [2, target_num_layers // 2, target_num_layers - 3]
++            logger.info(f"EAGLE3: extract_layers = {extract_layers} (target model has {target_num_layers} layers)")
++            self.gguf_writer.add_array(f"{self.gguf_writer.arch}.extract_layers", extract_layers)
++
++            # EAGLE3 target_hidden_size: prefer EAGLE3 config, fallback to target config
++            if "target_hidden_size" in eagle3_raw_config and eagle3_raw_config["target_hidden_size"] is not None:
++                target_hidden_size = eagle3_raw_config["target_hidden_size"]
++                logger.info(f"EAGLE3: target_hidden_size = {target_hidden_size} (from EAGLE3 config)")
++            else:
++                target_hidden_size = target_config["hidden_size"]
++                logger.info(f"EAGLE3: target_hidden_size = {target_hidden_size} (from target model config)")
++            self.gguf_writer.add_uint32(f"{self.gguf_writer.arch}.target_hidden_size", target_hidden_size)
++
++            # Eagle3Speculator norm_before_residual specific handling
++            norm_before_residual = eagle3_raw_config.get("norm_before_residual", False)
++            logger.info(f"EAGLE3: norm_before_residual = {norm_before_residual} (from EAGLE3 config)")
++            self.gguf_writer.add_bool(f"{self.gguf_writer.arch}.norm_before_residual", norm_before_residual)
++
+     def set_vocab(self):
++        # For EAGLE-3 models, use tokenizer from target model if provided
++        if hasattr(self, 'is_eagle3') and self.is_eagle3:
++            if self.target_model_dir is None:
++                raise ValueError(
++                    "EAGLE-3 draft model requires --target-model-dir to be specified. "
++                    "Please provide the path to the target model directory containing the tokenizer."
++                )
++            logger.info(f"EAGLE-3: Using tokenizer from target model: {self.target_model_dir}")
++            # Temporarily swap dir_model to load tokenizer from target model
++            original_dir_model = self.dir_model
++            self.dir_model = self.target_model_dir
++
+         if self.origin_hf_arch == "GlmasrModel":
+             return self._set_vocab_glmedge()
+ 
+@@ -2867,6 +2925,10 @@ class LlamaModel(TextModel):
+         if self.hparams.get("vocab_size", 32000) == 49152:
+             self.gguf_writer.add_add_bos_token(False)
+ 
++        # Restore original dir_model for EAGLE-3
++        if hasattr(self, 'is_eagle3') and self.is_eagle3:
++            self.dir_model = original_dir_model
++
+     def set_gguf_parameters(self):
+         super().set_gguf_parameters()
+         hparams = self.hparams
+@@ -2888,7 +2950,55 @@ class LlamaModel(TextModel):
+ 
+     _experts: list[dict[str, Tensor]] | None = None
+ 
++    def index_tensors(self, remote_hf_model_id: str | None = None) -> dict[str, Callable[[], Tensor]]:
++        tensors = super().index_tensors(remote_hf_model_id)
++
++        # Handle Eagle3Speculator nested config
++        if "transformer_layer_config" in self.hparams:
++            self.hparams = {**self.hparams, **self.hparams["transformer_layer_config"]}
++            
++        # EAGLE-3 detection: check hparams directly (before self.is_eagle3 is set)
++        if "draft_vocab_size" in self.hparams and self.hparams["num_hidden_layers"] == 1:
++            logger.info("EAGLE-3: Renaming midlayer.* or layers.0.* to model.layers.0.*")
++            new_tensors = {}
++            # EAGLE-3: rename midlayer.* to model.layers.0.* for compatibility with llama model
++            for name, gen in tensors.items():
++                if name.startswith("midlayer."):
++                    new_name = "model.layers.0." + name[len("midlayer."):]
++                    new_tensors[new_name] = gen
++                elif name.startswith("layers.0."): # layers.0.* -> model.layers.0.* (Eagle3Speculator format)
++                    new_name = "model." + name
++                    new_tensors[new_name] = gen
++                else:
++                    new_tensors[name] = gen
++            return new_tensors
++        else:
++            return tensors
++
+     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
++
++        # Eagle-3 llama checkpoint special handling
++        if hasattr(self, 'is_eagle3') and self.is_eagle3:
++            # Eagle-3 llama checkpoint special weights handling
++            # fc.weight: feature fusion layer
++            if name == "fc.weight":
++                yield (name, data_torch)
++                return
++            # d2t: draft to target vocabulary mapping
++            elif name == "d2t":
++                # Skip parent class processing (store for manual handling in prepare_tensors)
++                if not hasattr(self, '_eagle3_int_tensors'):
++                    self._eagle3_int_tensors = {}
++                self._eagle3_int_tensors[name] = data_torch
++                return
++            # t2d: target to draft vocabulary mapping (not used, skip completely)
++            elif name == "t2d":
++                return
++            # hidden_norm: EAGLE-3 specific layer normalization
++            elif name == "model.layers.0.hidden_norm.weight":
++                yield ("blk.0.hidden_norm.weight", data_torch)
++                return
++
+         n_head = self.find_hparam(["n_heads", "num_attention_heads"])
+         n_kv_head = self.find_hparam(["n_kv_heads", "num_key_value_heads"])
+ 
+@@ -2958,6 +3068,17 @@ class LlamaModel(TextModel):
+         yield from super().modify_tensors(data_torch, name, bid)
+ 
+     def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
++        # EAGLE3: If no lm_head in draft model, load from target model
++        if hasattr(self, 'is_eagle3') and self.is_eagle3 and "lm_head.weight" not in self.model_tensors:
++            from safetensors import safe_open
++            for sf_file in self.target_model_dir.glob("*.safetensors"):
++                with safe_open(sf_file, framework="pt") as f:
++                    if "lm_head.weight" in f.keys():
++                        lm_head = f.get_tensor("lm_head.weight")
++                        logger.info(f"EAGLE3: No lm_head in draft model, loaded lm_head from {sf_file.name}, shape = {lm_head.shape}")
++                        yield ("output.weight", lm_head)
++                        break
++
+         if rope_params := self.rope_parameters.get("full_attention", self.rope_parameters):
+             if rope_params.get("rope_type", '').lower() == "llama3":
+                 base = rope_params.get("rope_theta", 10000.0)
+@@ -2988,8 +3109,26 @@ class LlamaModel(TextModel):
+                 yield (self.format_tensor_name(gguf.MODEL_TENSOR.ROPE_FREQS), torch.tensor(rope_factors, dtype=torch.float32))
+ 
+     def prepare_tensors(self):
++        # EAGLE-3: collect original dtypes BEFORE parent class converts them to F32
++        eagle3_original_dtypes = {}
++        if hasattr(self, 'is_eagle3') and self.is_eagle3:
++            for name, data_torch in self.get_tensors():
++                if name == "d2t":
++                    eagle3_original_dtypes[name] = data_torch.dtype
++
+         super().prepare_tensors()
+ 
++        if hasattr(self, 'is_eagle3') and self.is_eagle3 and hasattr(self, '_eagle3_int_tensors'):
++            for name, data_torch in self._eagle3_int_tensors.items():
++                old_dtype = eagle3_original_dtypes.get(name, data_torch.dtype)
++                # Keep as int64 to match original torch tensor dtype
++                data = data_torch.to(torch.int64).numpy()
++                data_qtype = gguf.GGMLQuantizationType.I64
++
++                shape_str = f"{{{', '.join(str(n) for n in reversed(data.shape))}}}"
++                logger.info(f"{name + ',':<30} {old_dtype} --> {data_qtype.name}, shape = {shape_str}")
++                self.gguf_writer.add_tensor(name, data, raw_dtype=data_qtype)
++
+         if self._experts is not None:
+             # flatten `list[dict[str, Tensor]]` into `list[str]`
+             experts = [k for d in self._experts for k in d.keys()]
+@@ -4743,6 +4882,47 @@ class Qwen3Model(Qwen2Model):
+         yield from super().modify_tensors(data_torch, name, bid)
+ 
+ 
++@ModelBase.register("DFlashDraftModel")
++class DFlashModel(Qwen3Model):
++    model_arch = gguf.MODEL_ARCH.DFLASH
++
++    def set_vocab(self):
++        if self.target_model_dir is None:
++            raise ValueError(
++                "DFlash draft model requires --target-model-dir to be specified. "
++                "Please provide the path to the target model directory containing the tokenizer."
++            )
++        logger.info(f"DFLASH: Using tokenizer from target model: {self.target_model_dir}")
++        original_dir = self.dir_model
++        self.dir_model = self.target_model_dir
++        super().set_vocab()
++        self.dir_model = original_dir
++
++    def set_gguf_parameters(self):
++        super().set_gguf_parameters()
++        block_size = self.hparams.get("block_size", 16)
++        self.gguf_writer.add_uint32(f"{self.gguf_writer.arch}.block_size", block_size)
++        dflash_config = self.hparams.get("dflash_config", {})
++        target_layer_ids = dflash_config.get("target_layer_ids", [])
++        if target_layer_ids:
++            extract_layer_ids = [i + 1 for i in target_layer_ids]
++            self.gguf_writer.add_array(f"{self.gguf_writer.arch}.target_layer_ids", extract_layer_ids)
++        mask_token_id = dflash_config.get("mask_token_id", None)
++        if mask_token_id is not None:
++            self.gguf_writer.add_uint32(f"{self.gguf_writer.arch}.mask_token_id", mask_token_id)
++
++    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
++        if name == "fc.weight":
++            yield (name, data_torch)
++            return
++        if name == "hidden_norm.weight":
++            yield ("hidden_norm.weight", data_torch)
++            return
++        if not name.startswith("model."):
++            name = "model." + name
++        yield from super().modify_tensors(data_torch, name, bid)
++
++
+ @ModelBase.register("Qwen3MoeForCausalLM")
+ class Qwen3MoeModel(Qwen2MoeModel):
+     model_arch = gguf.MODEL_ARCH.QWEN3MOE
+@@ -13207,6 +13387,7 @@ class LazyTorchTensor(gguf.LazyBase):
+         torch.float16: np.float16,
+         torch.float32: np.float32,
+         torch.uint8: np.uint8,
++        torch.int64: np.int64,
+     }
+ 
+     # only used when byteswapping data. Only correct size is needed
+@@ -13368,6 +13549,10 @@ def parse_args() -> argparse.Namespace:
+         "--no-tensor-first-split", action="store_true",
+         help="do not add tensors to the first split (disabled by default)"
+     )
++    parser.add_argument(
++        "--target-model-dir", type=str, default=None,
++        help="directory containing target model tokenizer (for EAGLE-3 draft models that don't have their own tokenizer)",
++    )
+     parser.add_argument(
+         "--metadata", type=Path,
+         help="Specify the path for an authorship metadata override file"
+@@ -13552,6 +13737,7 @@ def main() -> None:
+                                      small_first_shard=args.no_tensor_first_split,
+                                      remote_hf_model_id=hf_repo_id, disable_mistral_community_chat_template=disable_mistral_community_chat_template,
+                                      sentence_transformers_dense_modules=args.sentence_transformers_dense_modules,
++                                     target_model_dir=Path(args.target_model_dir) if args.target_model_dir else None,
+                                      fuse_gate_up_exps=args.fuse_gate_up_exps
+                                      )
+ 
+diff --git a/examples/speculative-simple/speculative-simple.cpp b/examples/speculative-simple/speculative-simple.cpp
+index a03dbce88..345164481 100644
+--- a/examples/speculative-simple/speculative-simple.cpp
++++ b/examples/speculative-simple/speculative-simple.cpp
+@@ -4,6 +4,7 @@
+ #include "speculative.h"
+ #include "log.h"
+ #include "llama.h"
++#include "chat.h"
+ 
+ #include <clocale>
+ #include <cstdio>
+@@ -79,13 +80,63 @@ int main(int argc, char ** argv) {
+             return 1;
+         }
+ 
++        params.speculative.model_tgt = model_tgt;
+         params.speculative.model_dft = model_dft.get();
+         params.speculative.cparams_dft = common_context_params_to_llama(params_dft);
++
++        if (params.speculative.eagle3) {
++            llama_set_eagle3(ctx_tgt, model_dft.get());
++        }
++        if (params.speculative.dflash) {
++            llama_set_dflash(ctx_tgt, model_dft.get());
++        }
++    }
++
++    // Apply chat template for EAGLE3 / DFlash if available which can increase the acceptance rate
++    std::string prompt = params.prompt;
++    if (params.speculative.eagle3 || params.speculative.dflash) {
++        auto chat_templates = common_chat_templates_init(model_tgt, params.chat_template);
++        if (common_chat_templates_was_explicit(chat_templates.get())) {
++            std::vector<common_chat_msg> chat_msgs;
++            common_chat_msg user_msg;
++            user_msg.role = "user";
++            user_msg.content = params.prompt;
++            chat_msgs.push_back(user_msg);
++
++            common_chat_templates_inputs inputs;
++            inputs.messages = chat_msgs;
++            inputs.add_generation_prompt = true;
++            // Disable thinking mode can improve accept rate
++            if (const char * nt = std::getenv("LLAMA_SPEC_NO_THINK"); nt && std::string(nt) != "0") {
++                // Qwen3 / 3.5
++                inputs.enable_thinking = false;
++                // gpt-oss
++                inputs.chat_template_kwargs["reasoning_effort"] = "\"low\"";
++            }
++            prompt = common_chat_templates_apply(chat_templates.get(), inputs).prompt;
++            LOG_INF("%s: %s chat template applied\n", __func__, params.speculative.eagle3 ? "EAGLE3" : "DFlash");
++        }
+     }
+ 
++    int n_predict = 0;
++    int n_drafted = 0;
++    int n_accept  = 0;
++
++    // used to determine end of generation
++    bool has_eos = false;
++
++    // ================================================
++    // everything until here is standard initialization
++    // the relevant stuff for speculative decoding starts here
++
++    const auto t_enc_start = ggml_time_us();
++
++    // target model sampling context
++    struct common_sampler * smpl = common_sampler_init(model_tgt, params.sampling);
++
+     // Tokenize the prompt
+     std::vector<llama_token> inp;
+-    inp = common_tokenize(ctx_tgt, params.prompt, true, true);
++    inp = common_tokenize(ctx_tgt, prompt, true, true);
+ 
+     if (llama_n_ctx(ctx_tgt) < (uint32_t) inp.size()) {
+         LOG_ERR("%s: the prompt exceeds the context size (%d tokens, ctx %d)\n", __func__, (int) inp.size(), llama_n_ctx(ctx_tgt));
+@@ -105,33 +156,38 @@ int main(int argc, char ** argv) {
+         LOG("%s", common_token_to_piece(ctx_tgt, id).c_str());
+     }
+ 
+-    int n_predict = 0;
+-    int n_drafted = 0;
+-    int n_accept  = 0;
+-
+-    // used to determine end of generation
+-    bool has_eos = false;
++    // eval the prompt
++    llama_token id_last;
++    llama_tokens prompt_tgt;
++    int n_past;
+ 
+-    // ================================================
+-    // everything until here is standard initialization
+-    // the relevant stuff for speculative decoding starts here
++    // TODO: simplify
++    if (params.speculative.eagle3 || params.speculative.dflash) {
++        // Target model decodes full prompt and sample first token and intermediate features are extracted
++        llama_decode(ctx_tgt, llama_batch_get_one(inp.data(), inp.size()));
+ 
+-    const auto t_enc_start = ggml_time_us();
++        id_last = common_sampler_sample(smpl, ctx_tgt, -1);
++        common_sampler_accept(smpl, id_last, true);
++        LOG("%s", common_token_to_piece(ctx_tgt, id_last).c_str());
++        n_predict++;
+ 
+-    // target model sampling context
+-    struct common_sampler * smpl = common_sampler_init(model_tgt, params.sampling);
++        // all tokens currently in the target context
++        prompt_tgt.assign(inp.begin(), inp.end());
++        prompt_tgt.reserve(llama_n_ctx(ctx_tgt));
+ 
+-    // eval the prompt
+-    llama_decode(ctx_tgt, llama_batch_get_one(inp.data(), inp.size() - 1));
++        n_past = inp.size();
++    } else {
++        llama_decode(ctx_tgt, llama_batch_get_one(inp.data(), inp.size() - 1));
+ 
+-    // note: keep the last token separate!
+-    llama_token id_last = inp.back();
++        // note: keep the last token separate!
++        id_last = inp.back();
+ 
+-    // all tokens currently in the target context
+-    llama_tokens prompt_tgt(inp.begin(), inp.end() - 1);
+-    prompt_tgt.reserve(llama_n_ctx(ctx_tgt));
++        // all tokens currently in the target context
++        prompt_tgt.assign(inp.begin(), inp.end() - 1);
++        prompt_tgt.reserve(llama_n_ctx(ctx_tgt));
+ 
+-    int n_past = inp.size() - 1;
++        n_past = inp.size() - 1;
++    }
+ 
+     // init the speculator
+     const auto & params_spec = params.speculative;
+@@ -146,6 +202,21 @@ int main(int argc, char ** argv) {
+ 
+     const auto t_dec_start = ggml_time_us();
+ 
++    // Hybrid targets (e.g. Qwen3.5) have recurrent layers that cannot be partially rolled back via seq_rm. 
++    // For them, snapshot the target state before verify and, on rejection, restore it and replay only the accepted tokens to ensure correctness 
++    // This is not efficient because the target model may run twice, but it is required in current llama.cpp design
++    const bool use_state_snapshot = params.speculative.dflash && llama_model_is_hybrid(model_tgt);
++    if (params.speculative.dflash) {
++        LOG_INF("%s: DFlash target=%s, using %s rollback path\n", __func__,
++                llama_model_is_hybrid(model_tgt) ? "hybrid" : "pure-attention",
++                use_state_snapshot ? "snapshot+restore" : "seq_rm");
++    }
++    std::vector<uint8_t> state_snap;
++    if (use_state_snapshot) {
++        const size_t sz = llama_state_seq_get_size(ctx_tgt, 0);
++        state_snap.resize(sz);
++    }
++
+     while (true) {
+         // optionally, generate draft tokens that can be appended to the target batch
+         //
+@@ -158,6 +229,17 @@ int main(int argc, char ** argv) {
+ 
+         //LOG_DBG("draft: %s\n", string_from(ctx_dft, draft).c_str());
+ 
++        // snapshot target state for potential rollback (hybrid/recurrent targets only)
++        const int         n_past_before = n_past;
++        const llama_token id_last_saved = id_last;
++        if (use_state_snapshot) {
++            const size_t sz = llama_state_seq_get_size(ctx_tgt, 0);
++            if (sz > state_snap.size()) {
++                state_snap.resize(sz);
++            }
++            llama_state_seq_get_data(ctx_tgt, state_snap.data(), sz, 0);
++        }
++
+         // always have a token to evaluate from before - id_last
+         common_batch_clear(batch_tgt);
+         common_batch_add  (batch_tgt, id_last, n_past++, { 0 }, true);
+@@ -222,7 +304,21 @@ int main(int argc, char ** argv) {
+ 
+         LOG_DBG("accepted %d/%d draft tokens, the last target token is: (%d)\n", (int) ids.size() - 1, (int) draft.size(), id_last);
+ 
+-        {
++        const bool had_rejection = ids.size() < draft.size() + 1;
++
++        if (use_state_snapshot && had_rejection) {
++            // Restore snapshot and replay the committed prefix (id_last + accepted drafts) so target state exactly
++            LOG_DBG("DFlash rollback: restore target state and replay %zu tokens\n", ids.size());
++            llama_state_seq_set_data(ctx_tgt, state_snap.data(), state_snap.size(), 0);
++            common_batch_clear(batch_tgt);
++            common_batch_add(batch_tgt, id_last_saved, n_past_before, { 0 }, true);
++            for (size_t i = 0; i + 1 < ids.size(); ++i) {
++                common_batch_add(batch_tgt, ids[i], n_past_before + 1 + i, { 0 }, true);
++            }
++            if (batch_tgt.n_tokens > 0) {
++                llama_decode(ctx_tgt, batch_tgt);
++            }
++        } else {
+             LOG_DBG("clear kv cache from any extra tokens, n_past = %d\n", n_past);
+ 
+             llama_memory_seq_rm(llama_get_memory(ctx_tgt), 0, n_past, -1);
+diff --git a/gguf-py/gguf/constants.py b/gguf-py/gguf/constants.py
+index 83ae51ce9..ce42394d9 100644
+--- a/gguf-py/gguf/constants.py
++++ b/gguf-py/gguf/constants.py
+@@ -152,6 +152,9 @@ class Keys:
+         SWIGLU_CLAMP_SHEXP                = "{arch}.swiglu_clamp_shexp"
+         DENSE_FEAT_IN_SIZE                = "{arch}.{dense}_feat_in"
+         DENSE_FEAT_OUT_SIZE               = "{arch}.{dense}_feat_out"
++        EAGLE3_EXTRACT_LAYERS             = "{arch}.extract_layers"
++        EAGLE3_TARGET_HIDDEN_SIZE         = "{arch}.target_hidden_size"
++        EAGLE3_NORM_BEFORE_RESIDUAL       = "{arch}.norm_before_residual"
+ 
+     class Attention:
+         HEAD_COUNT                   = "{arch}.attention.head_count"
+@@ -490,6 +493,8 @@ class MODEL_ARCH(IntEnum):
+     PANGU_EMBED      = auto()
+     MISTRAL3         = auto()
+     MISTRAL4         = auto()
++    EAGLE3           = auto()
++    DFLASH           = auto()
+     PADDLEOCR        = auto()
+     MIMO2            = auto()
+     STEP35           = auto()
+@@ -844,6 +849,13 @@ class MODEL_TENSOR(IntEnum):
+     NEXTN_HNORM          = auto()
+     NEXTN_SHARED_HEAD_HEAD = auto()
+     NEXTN_SHARED_HEAD_NORM = auto()
++    # EAGLE3 specific tensors
++    EAGLE3_FC          = auto()  # feature fusion layer
++    EAGLE3_HIDDEN_NORM = auto()  # hidden normalization
++    EAGLE3_D2T         = auto()  # draft to target vocabulary mapping
++    # DFlash
++    DFLASH_FC          = auto()  # feature fusion layer
++    DFLASH_HIDDEN_NORM = auto()  # hidden normalization
+     # lfm2 audio
+     A_ENC_NORM_CONV        = auto()
+     A_ENC_LINEAR_POS       = auto()
+@@ -977,6 +989,8 @@ MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
+     MODEL_ARCH.PANGU_EMBED:      "pangu-embedded",
+     MODEL_ARCH.MISTRAL3:         "mistral3",
+     MODEL_ARCH.MISTRAL4:         "mistral4",
++    MODEL_ARCH.EAGLE3:           "eagle3",
++    MODEL_ARCH.DFLASH:           "dflash",
+     MODEL_ARCH.PADDLEOCR:        "paddleocr",
+     MODEL_ARCH.MIMO2:            "mimo2",
+     MODEL_ARCH.STEP35:           "step35",
+@@ -1340,6 +1354,11 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
+     MODEL_TENSOR.NEXTN_HNORM:               "blk.{bid}.nextn.hnorm",
+     MODEL_TENSOR.NEXTN_SHARED_HEAD_HEAD:    "blk.{bid}.nextn.shared_head_head",
+     MODEL_TENSOR.NEXTN_SHARED_HEAD_NORM:    "blk.{bid}.nextn.shared_head_norm",
++    MODEL_TENSOR.EAGLE3_FC:                 "fc",
++    MODEL_TENSOR.EAGLE3_HIDDEN_NORM:        "blk.{bid}.hidden_norm",
++    MODEL_TENSOR.EAGLE3_D2T:                "d2t",
++    MODEL_TENSOR.DFLASH_FC:                 "fc",
++    MODEL_TENSOR.DFLASH_HIDDEN_NORM:        "hidden_norm",
+ }
+ 
+ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
+@@ -3773,6 +3792,40 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
+         MODEL_TENSOR.FFN_UP_SHEXP,
+         MODEL_TENSOR.FFN_EXP_PROBS_B,
+     ],
++    MODEL_ARCH.EAGLE3: [
++        MODEL_TENSOR.TOKEN_EMBD,
++        MODEL_TENSOR.OUTPUT_NORM,
++        MODEL_TENSOR.OUTPUT,
++        MODEL_TENSOR.ROPE_FREQS,
++        MODEL_TENSOR.ATTN_NORM,
++        MODEL_TENSOR.ATTN_Q,
++        MODEL_TENSOR.ATTN_K,
++        MODEL_TENSOR.ATTN_V,
++        MODEL_TENSOR.ATTN_OUT,
++        MODEL_TENSOR.FFN_NORM,
++        MODEL_TENSOR.FFN_GATE,
++        MODEL_TENSOR.FFN_DOWN,
++        MODEL_TENSOR.FFN_UP,
++        MODEL_TENSOR.EAGLE3_FC,
++        MODEL_TENSOR.EAGLE3_HIDDEN_NORM,
++        MODEL_TENSOR.EAGLE3_D2T,
++    ],
++    MODEL_ARCH.DFLASH: [
++        MODEL_TENSOR.OUTPUT_NORM,
++        MODEL_TENSOR.ATTN_NORM,
++        MODEL_TENSOR.ATTN_Q,
++        MODEL_TENSOR.ATTN_Q_NORM,
++        MODEL_TENSOR.ATTN_K,
++        MODEL_TENSOR.ATTN_K_NORM,
++        MODEL_TENSOR.ATTN_V,
++        MODEL_TENSOR.ATTN_OUT,
++        MODEL_TENSOR.FFN_NORM,
++        MODEL_TENSOR.FFN_GATE,
++        MODEL_TENSOR.FFN_DOWN,
++        MODEL_TENSOR.FFN_UP,
++        MODEL_TENSOR.DFLASH_FC,
++        MODEL_TENSOR.DFLASH_HIDDEN_NORM,
++    ],
+     MODEL_ARCH.MIMO2: [
+         MODEL_TENSOR.TOKEN_EMBD,
+         MODEL_TENSOR.OUTPUT_NORM,
+diff --git a/include/llama.h b/include/llama.h
+index eb8698140..fc629fd5c 100644
+--- a/include/llama.h
++++ b/include/llama.h
+@@ -375,6 +375,10 @@ extern "C" {
+                           // try to disable when n_seq_max > 1 for improved performance when the sequences do not share a large prefix
+                           // ref: https://github.com/ggml-org/llama.cpp/pull/14363
+ 
++        // EAGLE3 extraction configuration
++        const struct llama_model * target_model; // reference to target model
++                                                 // only used to share embedding layer with eagle3 model
++
+         // [EXPERIMENTAL]
+         // backend sampler chain configuration (make sure the caller keeps the sampler chains alive)
+         // note: the samplers must be sampler chains (i.e. use llama_sampler_chain_init)
+@@ -554,6 +558,12 @@ extern "C" {
+     LLAMA_API int32_t llama_model_n_head_kv  (const struct llama_model * model);
+     LLAMA_API int32_t llama_model_n_swa      (const struct llama_model * model);
+ 
++    // DFlash draft model: block size used as number of draft tokens
++    LLAMA_API int32_t llama_model_dflash_block_size(const struct llama_model * model);
++
++    // DFlash draft model: mask token id used as filler in the noise block
++    LLAMA_API int32_t llama_model_dflash_mask_token_id(const struct llama_model * model);
++
+     // Get the model's RoPE frequency scaling factor
+     LLAMA_API float llama_model_rope_freq_scale_train(const struct llama_model * model);
+ 
+@@ -686,6 +696,14 @@ extern "C" {
+                          int32_t   il_start,
+                          int32_t   il_end);
+ 
++    //
++    // eagle3 (tmp)
++    //
++
++    LLAMA_API void llama_set_eagle3(
++            struct llama_context * ctx,
++            const struct llama_model * model);
++
+     //
+     // Memory
+     //
+@@ -885,6 +903,41 @@ extern "C" {
+                     llama_seq_id   dest_seq_id,
+            llama_state_seq_flags   flags);
+ 
++    //
++    // EAGLE3 draft model support
++    //
++
++    // Get pointer to target model features extracted for EAGLE3 encoder
++    // Returns NULL if no features are available
++    // Format: [3*n_embd, n_tokens] - use model.hparams.n_embd and batch.n_tokens for dimensions
++    LLAMA_API const float * llama_get_eagle3_target_features(struct llama_context * ctx);
++
++    // Set g_embeddings from EAGLE3 encoder output for decoder input
++    // g_embd: pointer to encoder output embeddings
++    LLAMA_API void llama_set_eagle3_g_embeddings(
++            struct llama_context * ctx,
++                   const float * g_embd,
++                       int32_t   n_embd,
++                       int32_t   n_tokens);
++
++    //
++    // DFlash draft model support (similar to EAGLE3)
++    //
++
++    // Enable DFlash target feature extraction on the target context
++    LLAMA_API void llama_set_dflash(
++            struct llama_context * ctx,
++            const struct llama_model * model);
++
++    LLAMA_API const float * llama_get_dflash_target_features(struct llama_context * ctx);
++
++    // Set accumulated target_ctx for DFlash decoder
++    LLAMA_API void llama_set_dflash_accumulated_target_ctx(
++            struct llama_context * ctx,
++                   const float * data,
++                       int32_t   n_embd,
++                       int32_t   n_tokens);
++
+     //
+     // Decoding
+     //
+diff --git a/src/llama-arch.cpp b/src/llama-arch.cpp
+index 633a66fc6..4f1148d7a 100644
+--- a/src/llama-arch.cpp
++++ b/src/llama-arch.cpp
+@@ -127,6 +127,8 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
+     { LLM_ARCH_PANGU_EMBED,      "pangu-embedded"   },
+     { LLM_ARCH_MISTRAL3,         "mistral3"         },
+     { LLM_ARCH_MISTRAL4,         "mistral4"         },
++    { LLM_ARCH_EAGLE3,           "eagle3"           },
++    { LLM_ARCH_DFLASH,           "dflash"           },
+     { LLM_ARCH_PADDLEOCR,        "paddleocr"        },
+     { LLM_ARCH_MIMO2,            "mimo2"            },
+     { LLM_ARCH_STEP35,           "step35"           },
+@@ -284,6 +286,14 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
+ 
+     { LLM_KV_CLASSIFIER_OUTPUT_LABELS, "%s.classifier.output_labels" },
+ 
++    { LLM_KV_EAGLE3_EXTRACT_LAYERS,        "%s.extract_layers"        },
++    { LLM_KV_EAGLE3_TARGET_HIDDEN_SIZE,    "%s.target_hidden_size"    },
++    { LLM_KV_EAGLE3_NORM_BEFORE_RESIDUAL,  "%s.norm_before_residual"  },
++
++    { LLM_KV_DFLASH_TARGET_LAYER_IDS,     "%s.target_layer_ids"     },
++    { LLM_KV_DFLASH_BLOCK_SIZE,           "%s.block_size"           },
++    { LLM_KV_DFLASH_MASK_TOKEN_ID,        "%s.mask_token_id"        },
++
+     { LLM_KV_SHORTCONV_L_CACHE, "%s.shortconv.l_cache" },
+     // sentence-transformers dense modules feature dims
+     { LLM_KV_DENSE_2_FEAT_IN,        "%s.dense_2_feat_in"  },
+@@ -547,6 +557,12 @@ static const std::map<llm_tensor, const char *> LLM_TENSOR_NAMES = {
+     { LLM_TENSOR_INDEXER_PROJ,                           "blk.%d.indexer.proj" },
+     { LLM_TENSOR_INDEXER_ATTN_K,                         "blk.%d.indexer.attn_k" },
+     { LLM_TENSOR_INDEXER_ATTN_Q_B,                       "blk.%d.indexer.attn_q_b" },
++    // EAGLE-3 specific layers
++    { LLM_TENSOR_EAGLE3_HIDDEN_NORM,                     "blk.%d.hidden_norm" },
++    { LLM_TENSOR_EAGLE3_FC,                              "fc" },
++    { LLM_TENSOR_EAGLE3_D2T,                             "d2t" },
++    { LLM_TENSOR_DFLASH_FC,                              "fc" },
++    { LLM_TENSOR_DFLASH_HIDDEN_NORM,                     "hidden_norm" },
+ };
+ 
+ // declare information about the model weight tensors:
+@@ -767,6 +783,12 @@ static const std::map<llm_tensor, llm_tensor_info> LLM_TENSOR_INFOS = {
+     // Nemotron 3 Super
+     {LLM_TENSOR_FFN_LATENT_DOWN,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+     {LLM_TENSOR_FFN_LATENT_UP,              {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
++    // EAGLE-3 tensors
++    {LLM_TENSOR_EAGLE3_FC,                  {LLM_TENSOR_LAYER_OUTPUT,    GGML_OP_MUL_MAT}},
++    {LLM_TENSOR_EAGLE3_HIDDEN_NORM,         {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
++    {LLM_TENSOR_EAGLE3_D2T,                 {LLM_TENSOR_LAYER_OUTPUT,    GGML_OP_GET_ROWS}},
++    {LLM_TENSOR_DFLASH_FC,                  {LLM_TENSOR_LAYER_OUTPUT,    GGML_OP_MUL_MAT}},
++    {LLM_TENSOR_DFLASH_HIDDEN_NORM,         {LLM_TENSOR_LAYER_OUTPUT,    GGML_OP_MUL}},
+ };
+ 
+ LLM_KV::LLM_KV(llm_arch arch, const char * suffix) : arch(arch), suffix(suffix) {}
+diff --git a/src/llama-arch.h b/src/llama-arch.h
+index 8f335f5c7..29f260eed 100644
+--- a/src/llama-arch.h
++++ b/src/llama-arch.h
+@@ -138,6 +138,8 @@ enum llm_arch {
+     LLM_ARCH_MAINCODER,
+     LLM_ARCH_KIMI_LINEAR,
+     LLM_ARCH_UNKNOWN,
++    LLM_ARCH_EAGLE3,
++    LLM_ARCH_DFLASH,
+ };
+ 
+ enum llm_kv {
+@@ -326,6 +328,14 @@ enum llm_kv {
+ 
+     LLM_KV_CLASSIFIER_OUTPUT_LABELS,
+ 
++    LLM_KV_EAGLE3_EXTRACT_LAYERS,
++    LLM_KV_EAGLE3_TARGET_HIDDEN_SIZE,
++    LLM_KV_EAGLE3_NORM_BEFORE_RESIDUAL,
++
++    LLM_KV_DFLASH_TARGET_LAYER_IDS,
++    LLM_KV_DFLASH_BLOCK_SIZE,
++    LLM_KV_DFLASH_MASK_TOKEN_ID,
++
+     LLM_KV_SHORTCONV_L_CACHE,
+ 
+     LLM_KV_XIELU_ALPHA_N,
+@@ -554,6 +564,11 @@ enum llm_tensor {
+     LLM_TENSOR_NEXTN_HNORM,
+     LLM_TENSOR_NEXTN_SHARED_HEAD_HEAD,
+     LLM_TENSOR_NEXTN_SHARED_HEAD_NORM,
++    LLM_TENSOR_EAGLE3_FC,              // eagle3: feature fusion layer
++    LLM_TENSOR_EAGLE3_HIDDEN_NORM,     // eagle3: additional normalization layer
++    LLM_TENSOR_EAGLE3_D2T,             // eagle3: draft to target vocabulary mapping
++    LLM_TENSOR_DFLASH_FC,
++    LLM_TENSOR_DFLASH_HIDDEN_NORM,
+ };
+ 
+ enum llm_tensor_layer {
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 8126249e1..894869749 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -165,6 +165,9 @@ llama_context::llama_context(
+     cparams.op_offload = params.op_offload;
+     cparams.kv_unified = params.kv_unified;
+ 
++    cparams.eagle3_extract_enabled = false;
++    cparams.dflash_extract_enabled = false;
++
+     // initialized later
+     cparams.pipeline_parallel = false;
+ 
+@@ -345,6 +348,15 @@ llama_context::llama_context(
+         if (cparams.pipeline_parallel) {
+             LLAMA_LOG_INFO("%s: pipeline parallelism enabled\n", __func__);
+         }
++        // temp fix: DFlash encoder/decoder share one model_dft, keep the role on the context
++        dflash_decoder_ctx = model.arch == LLM_ARCH_DFLASH && params.target_model != nullptr;
++        // DFlash decoder: pre-fill cross with reservation size so build_inp_cross_embd
++        // uses cparams.n_ctx instead of hparams.n_ctx_train (which can cause OOM)
++        if (dflash_decoder_ctx) {
++            cross.n_embd = hparams.n_embd;
++            cross.n_enc  = cparams.n_ctx;
++            cross.v_embd.resize(cross.n_embd * cross.n_enc, 0.0f);
++        }
+ 
+         sched_reserve();
+ 
+@@ -1168,7 +1180,78 @@ bool llama_context::set_adapter_cvec(
+     return res;
+ }
+ 
++void llama_context::set_eagle3(const llama_model * model) {
++    // Initialize EAGLE3 feature extraction configuration
++    cparams.eagle3_extract_enabled = !!model;
++    if (!cparams.eagle3_extract_enabled) {
++        return;
++    }
++
++    sched_need_reserve = true;
++
++    const auto & eagle3_hparams = model->hparams;
++
++    // Copy feature extraction layer indices from EAGLE3 model's hparams
++    eagle3.extract_layer_indices.assign(
++            eagle3_hparams.eagle3_extract_layers.begin(),
++            eagle3_hparams.eagle3_extract_layers.end()
++            );
++
++    // Allocate tensors array for extraction
++    eagle3.extract_tensors.resize(eagle3.extract_layer_indices.size(), nullptr);
++
++    LLAMA_LOG_INFO("%s: EAGLE3 extraction enabled for layers [%d, %d, %d]\n", __func__,
++            eagle3.extract_layer_indices[0],
++            eagle3.extract_layer_indices[1],
++            eagle3.extract_layer_indices[2]);
++}
++
++void llama_context::set_dflash(const llama_model * model) {
++    cparams.dflash_extract_enabled = !!model;
++    if (!cparams.dflash_extract_enabled) {
++        return;
++    }
++
++    sched_need_reserve = true;
++
++    const auto & dflash_hparams = model->hparams;
++
++    dflash.extract_layer_indices.assign(
++            dflash_hparams.dflash_target_layer_ids.begin(),
++            dflash_hparams.dflash_target_layer_ids.end()
++            );
++
++    dflash.extract_tensors.resize(dflash.extract_layer_indices.size(), nullptr);
++
++    LLAMA_LOG_INFO("%s: DFlash extraction enabled for layers [%d, %d, %d, %d, %d]\n", __func__,
++            dflash.extract_layer_indices[0],
++            dflash.extract_layer_indices[1],
++            dflash.extract_layer_indices[2],
++            dflash.extract_layer_indices[3],
++            dflash.extract_layer_indices[4]);
++}
++
++const float * llama_context::get_dflash_target_features() const {
++    GGML_ASSERT(!dflash.target_features.empty() && "DFlash target features not extracted");
++    return dflash.target_features.data();
++}
++
++void llama_context::set_dflash_accumulated_target_ctx(const float * data, int32_t n_embd, int32_t n_tokens) {
++    GGML_ASSERT(data != nullptr);
++    const size_t size = (size_t)n_embd * n_tokens;
++    // Store in cross struct (reusing T5 style cross-attention for accumulated target features fed to the DFlash decoder)
++    cross.n_embd = n_embd;
++    cross.n_enc  = n_tokens;
++    cross.v_embd.resize(size);
++    std::memcpy(cross.v_embd.data(), data, size * sizeof(float));
++}
++
+ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
++    // DFlash decoder runs through encode path due to no kv-cache but it needs decoder graph type
++    if (model.arch == LLM_ARCH_DFLASH && dflash_decoder_ctx && gtype == LLM_GRAPH_TYPE_ENCODER) {
++        gtype = LLM_GRAPH_TYPE_DECODER;
++    }
++
+     if (mctx && !mctx->apply()) {
+         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
+         ret = GGML_STATUS_FAILED;
+@@ -1225,6 +1308,30 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+         // FIXME this call causes a crash if any model inputs were not used in the graph and were therefore not allocated
+         res->set_inputs(&ubatch);
+ 
++        // EAGLE3: Fill g_embeddings for decoder input
++        if (model.arch == LLM_ARCH_EAGLE3 && gtype == LLM_GRAPH_TYPE_DECODER && !eagle3.g_embeddings.empty()) {
++            ggml_tensor * g_embd = ggml_graph_get_tensor(gf, "inp_g_embeddings");
++            if (g_embd) {
++                ggml_backend_tensor_set(g_embd, eagle3.g_embeddings.data(), 0, ggml_nbytes(g_embd));
++            }
++        }
++
++        // temp fix DFlash: Fill position tensor for decoder
++        if (model.arch == LLM_ARCH_DFLASH && gtype == LLM_GRAPH_TYPE_DECODER && !cross.v_embd.empty()) {
++            const int64_t n_ctx = cross.n_enc;
++            const int64_t n_noise = ubatch.n_tokens;
++            const int64_t n_total = n_ctx + n_noise;
++
++            ggml_tensor * pos_full = ggml_graph_get_tensor(gf, "inp_pos_full");
++            if (pos_full) {
++                std::vector<int32_t> pos_data(n_total);
++                for (int64_t i = 0; i < n_total; ++i) {
++                    pos_data[i] = (int32_t)i;
++                }
++                ggml_backend_tensor_set(pos_full, pos_data.data(), 0, n_total * sizeof(int32_t));
++            }
++        }
++
+         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
+     }
+ 
+@@ -1235,6 +1342,15 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+         return nullptr;
+     }
+ 
++    // EAGLE3: Extract intermediate layer features after graph execution
++    if (cparams.eagle3_extract_enabled && !eagle3.extract_tensors.empty()) {
++        extract_eagle3_features(ubatch);
++    }
++
++    if (cparams.dflash_extract_enabled && !dflash.extract_tensors.empty()) {
++        extract_dflash_features(ubatch);
++    }
++
+     ret = GGML_STATUS_SUCCESS;
+ 
+     return res;
+@@ -1250,7 +1366,15 @@ int llama_context::encode(const llama_batch & batch_inp) {
+ 
+     const auto & hparams = model.hparams;
+ 
+-    const int64_t n_embd  = hparams.n_embd_inp();
++    // EAGLE3/DFlash: use concatenated features size from target for draft encoder input
++    int64_t n_embd = hparams.n_embd;
++    if (batch_inp.embd) {
++        if (model.arch == LLM_ARCH_EAGLE3) {
++            n_embd = 3 * hparams.eagle3_target_hidden_size;
++        } else if (model.arch == LLM_ARCH_DFLASH) {
++            n_embd = (int64_t) hparams.dflash_target_layer_ids.size() * hparams.n_embd;
++        }
++    }
+     const int64_t n_vocab = model.vocab.n_tokens();
+ 
+     // note: during encode, we always pass the full sequence starting from pos = 0
+@@ -1336,8 +1460,15 @@ int llama_context::encode(const llama_batch & batch_inp) {
+                     GGML_ASSERT(embd.data != nullptr);
+                     const uint32_t n_embd_out = hparams.n_embd_out();
+ 
+-                    GGML_ASSERT(n_tokens*n_embd_out <= (int64_t) embd.size);
+-                    ggml_backend_tensor_get_async(backend_embd, t_embd, embd.data, 0, n_tokens*n_embd_out*sizeof(float));
++                    if (model.arch == LLM_ARCH_EAGLE3) {
++                        // g_embeddings are stored temporarily in embd buffer
++                        const int64_t out_embd = hparams.n_embd;
++                        GGML_ASSERT(n_tokens * out_embd <= (int64_t) embd.size);
++                        ggml_backend_tensor_get_async(backend_embd, t_embd, embd.data, 0, n_tokens * out_embd * sizeof(float));
++                    } else {
++                        GGML_ASSERT(n_tokens*n_embd_out <= (int64_t) embd.size);
++                        ggml_backend_tensor_get_async(backend_embd, t_embd, embd.data, 0, n_tokens*n_embd_out*sizeof(float));
++                    }
+                 } break;
+             case LLAMA_POOLING_TYPE_MEAN:
+             case LLAMA_POOLING_TYPE_CLS:
+@@ -1730,7 +1861,8 @@ int llama_context::decode(const llama_batch & batch_inp) {
+         auto * t_logits = res->get_logits();
+         auto * t_embd   = cparams.embeddings ? res->get_embd() : nullptr;
+ 
+-        if (t_embd && res->get_embd_pooled()) {
++        // For EAGLE3, don't override t_embd with t_embd_pooled - we need the prenorm value during eagle3 decoder autoregressive generation
++        if (t_embd && res->get_embd_pooled() && model.arch != LLM_ARCH_EAGLE3) {
+             t_embd = res->get_embd_pooled();
+         }
+ 
+@@ -1745,7 +1877,40 @@ int llama_context::decode(const llama_batch & batch_inp) {
+             if (n_outputs) {
+                 GGML_ASSERT( n_outputs_prev + n_outputs <= n_outputs_all);
+                 GGML_ASSERT((n_outputs_prev + n_outputs)*n_vocab <= (int64_t) logits.size);
+-                ggml_backend_tensor_get_async(backend_res, t_logits, logits_out, 0, n_outputs*n_vocab*sizeof(float));
++
++                // EAGLE3: Map draft vocab to target vocab
++                if (model.arch == LLM_ARCH_EAGLE3 && model.d2t) {
++                    static thread_local std::vector<int64_t> eagle3_d2t_map;
++                    static thread_local std::vector<float>   eagle3_draft_logits;
++
++                    const int64_t draft_vocab_size = t_logits->ne[0];
++                    const uint32_t last_idx = n_outputs - 1;
++
++                    // Load d2t mapping once (on first call)
++                    if (eagle3_d2t_map.empty()) {
++                        eagle3_d2t_map.resize(model.d2t->ne[0]);
++                        ggml_backend_tensor_get(model.d2t, eagle3_d2t_map.data(), 0, eagle3_d2t_map.size() * sizeof(int64_t));
++                    }
++
++                    // Read only the last token's draft logits
++                    eagle3_draft_logits.resize(draft_vocab_size);
++                    const size_t last_offset = last_idx * draft_vocab_size * sizeof(float);
++                    ggml_backend_tensor_get_async(backend_res, t_logits, eagle3_draft_logits.data(), last_offset, draft_vocab_size * sizeof(float));
++                    synchronize();
++
++
++                    // Map only the last token's draft logits to target vocab
++                    float * last_logits_out = logits_out + last_idx * n_vocab;
++                    std::fill(last_logits_out, last_logits_out + n_vocab, -std::numeric_limits<float>::infinity());
++
++                    for (int64_t j = 0; j < draft_vocab_size; j++) {
++                        const int64_t target_id = j + eagle3_d2t_map[j];
++                        GGML_ASSERT(target_id >= 0 && target_id < n_vocab);
++                        last_logits_out[target_id] = eagle3_draft_logits[j];
++                    }
++                } else {
++                    ggml_backend_tensor_get_async(backend_res, t_logits, logits_out, 0, n_outputs*n_vocab*sizeof(float));
++                }
+             }
+         }
+ 
+@@ -2121,7 +2286,23 @@ ggml_cgraph * llama_context::graph_reserve(
+ 
+     auto * res = gf_res_reserve.get();
+ 
+-    const auto gparams = graph_params(res, ubatch, mctx, LLM_GRAPH_TYPE_DEFAULT);
++    // EAGLE3: auto-detect encoder (embeddings+no target_model) or decoder (has target_model)
++    llm_graph_type gtype = LLM_GRAPH_TYPE_DEFAULT;
++    if (model.arch == LLM_ARCH_EAGLE3) {
++        if (cparams.embeddings && model.target_tok_embd == nullptr) {
++            gtype = LLM_GRAPH_TYPE_ENCODER;
++        } else if (model.target_tok_embd != nullptr) {
++            gtype = LLM_GRAPH_TYPE_DECODER;
++        }
++    }
++    if (model.arch == LLM_ARCH_DFLASH) {
++        if (cparams.embeddings && !dflash_decoder_ctx) {
++            gtype = LLM_GRAPH_TYPE_ENCODER;
++        } else if (dflash_decoder_ctx) {
++            gtype = LLM_GRAPH_TYPE_DECODER;
++        }
++    }
++    const auto gparams = graph_params(res, ubatch, mctx, gtype);
+ 
+     res->reset();
+ 
+@@ -2162,6 +2343,8 @@ llm_graph_params llama_context::graph_params(
+         /*.loras       =*/ loras.get(),
+         /*.mctx        =*/ mctx,
+         /*.cross       =*/ &cross,
++        /*.eagle3      =*/ &eagle3,
++        /*.dflash      =*/ &dflash,
+         /*.samplers    =*/ sampling.samplers,
+         /*.n_outputs   =*/ n_outputs,
+         /*.cb          =*/ graph_get_cb(),
+@@ -2206,6 +2389,41 @@ llm_graph_cb llama_context::graph_get_cb() const {
+             ggml_set_name(cur, name);
+         }
+ 
++        // EAGLE3: Extract intermediate layer features if this is an extraction point
++        if (cparams.eagle3_extract_enabled) {
++            static constexpr const char * prefix = "eagle3_extract_";
++            static constexpr size_t prefix_len = 15; // strlen("eagle3_extract_")
++
++            if (strncmp(name, prefix, prefix_len) == 0) {
++                // Parse the extraction index from the name (e.g., "eagle3_extract_0" -> 0)
++                size_t extract_idx = 0;
++                if (sscanf(name + prefix_len, "%zu", &extract_idx) == 1 && extract_idx < eagle3.extract_tensors.size()) {
++                    // Mark as output tensor to ensure proper backend assignment
++                    ggml_set_output(cur);
++                    // Store this tensor reference for post-execution extraction
++                    eagle3.extract_tensors[extract_idx] = cur;
++                    LLAMA_LOG_DEBUG("%s: EAGLE3 stored tensor reference for extraction: "
++                                   "index=%zu, layer=%d, target_layer=%d, tensor=%s\n",
++                                   __func__, extract_idx, il,
++                                   eagle3.extract_layer_indices[extract_idx], name);
++                }
++            }
++        }
++
++        // DFlash: Extract intermediate layer features if this is an extraction point
++        if (cparams.dflash_extract_enabled) {
++            static constexpr const char * prefix = "dflash_extract_";
++            static constexpr size_t prefix_len = 15;
++
++            if (strncmp(name, prefix, prefix_len) == 0) {
++                size_t extract_idx = 0;
++                if (sscanf(name + prefix_len, "%zu", &extract_idx) == 1 && extract_idx < dflash.extract_tensors.size()) {
++                    ggml_set_output(cur);
++                    dflash.extract_tensors[extract_idx] = cur;
++                }
++            }
++        }
++
+         // norm may be automatically assigned to the backend of the previous layer, increasing data transfer between backends
+         // FIXME: fix in ggml_backend_sched
+         const bool full_offload = model.n_gpu_layers() > model.hparams.n_layer;
+@@ -2224,6 +2442,90 @@ llm_graph_cb llama_context::graph_get_cb() const {
+     };
+ }
+ 
++void llama_context::extract_eagle3_features(const llama_ubatch & ubatch) {
++    const int64_t n_tokens = ubatch.n_tokens;
++    const int64_t n_embd = model.hparams.n_embd;
++    const size_t n_layers = eagle3.extract_tensors.size();
++
++    // Allocate storage for concatenated features
++    const int64_t n_embd_concat = n_embd * n_layers;
++    eagle3.target_features.resize(n_embd_concat * n_tokens);
++
++    // Temporary buffer to hold layer features before transposing
++    static thread_local std::vector<float> temp_layer_features;
++    temp_layer_features.resize(n_embd * n_tokens);
++
++    LLAMA_LOG_DEBUG("%s: Start to extract EAGLE3 features: %zu layers, %lld tokens, %lld embd\n",
++                    __func__, n_layers, (long long)n_tokens, (long long)n_embd);
++
++    // Extract each layer's features and interleave into token-major layout
++    for (size_t layer_idx = 0; layer_idx < n_layers; ++layer_idx) {
++        ggml_tensor * tensor = eagle3.extract_tensors[layer_idx];
++        GGML_ASSERT(tensor != nullptr && "EAGLE3 extraction tensor is null");
++
++        // Get the backend where this tensor is stored
++        ggml_backend_t backend = ggml_backend_sched_get_tensor_backend(sched.get(), tensor);
++        GGML_ASSERT(backend != nullptr && "EAGLE3 tensor has no backend");
++
++        // Verify tensor shape: should be [n_embd, n_tokens]
++        GGML_ASSERT(tensor->ne[0] == n_embd && tensor->ne[1] == n_tokens &&
++                    "EAGLE3 extraction tensor has unexpected shape");
++
++        // Get layer features to temp buffer
++        const size_t size_bytes = n_embd * n_tokens * sizeof(float);
++        ggml_backend_tensor_get_async(backend, tensor, temp_layer_features.data(), 0, size_bytes);
++        ggml_backend_sched_synchronize(sched.get());
++
++        // Then copy to correct position in target_features
++        // target_features layout: [token_0_all_layers, token_1_all_layers, ...]
++        // Each token has [layer_0_embd, layer_1_embd, layer_2_embd]
++        for (int64_t token_idx = 0; token_idx < n_tokens; ++token_idx) {
++            // Source: temp_layer_features[token_idx * n_embd ... (token_idx + 1) * n_embd - 1]
++            const float * src = temp_layer_features.data() + token_idx * n_embd;
++            // Dest: target_features[token_idx * n_embd_concat + layer_idx * n_embd]
++            float * dest = eagle3.target_features.data() + token_idx * n_embd_concat + layer_idx * n_embd;
++            std::memcpy(dest, src, n_embd * sizeof(float));
++        }
++    }
++
++}
++
++void llama_context::extract_dflash_features(const llama_ubatch & ubatch) {
++    const int64_t n_tokens = ubatch.n_tokens;
++    const int64_t n_embd = model.hparams.n_embd;
++    const size_t n_layers = dflash.extract_tensors.size();
++
++    const int64_t n_embd_concat = n_embd * n_layers;
++    dflash.target_features.resize(n_embd_concat * n_tokens);
++
++    static thread_local std::vector<float> temp_layer_features;
++    temp_layer_features.resize(n_embd * n_tokens);
++
++    LLAMA_LOG_DEBUG("%s: Start to extract DFlash features: %zu layers, %lld tokens, %lld embd\n",
++                    __func__, n_layers, (long long)n_tokens, (long long)n_embd);
++
++    for (size_t layer_idx = 0; layer_idx < n_layers; ++layer_idx) {
++        ggml_tensor * tensor = dflash.extract_tensors[layer_idx];
++        GGML_ASSERT(tensor != nullptr && "DFlash extraction tensor is null");
++
++        ggml_backend_t backend = ggml_backend_sched_get_tensor_backend(sched.get(), tensor);
++        GGML_ASSERT(backend != nullptr && "DFlash tensor has no backend");
++
++        GGML_ASSERT(tensor->ne[0] == n_embd && tensor->ne[1] == n_tokens &&
++                    "DFlash extraction tensor has unexpected shape");
++
++        const size_t size_bytes = n_embd * n_tokens * sizeof(float);
++        ggml_backend_tensor_get_async(backend, tensor, temp_layer_features.data(), 0, size_bytes);
++        ggml_backend_sched_synchronize(sched.get());
++
++        for (int64_t token_idx = 0; token_idx < n_tokens; ++token_idx) {
++            const float * src = temp_layer_features.data() + token_idx * n_embd;
++            float * dest = dflash.target_features.data() + token_idx * n_embd_concat + layer_idx * n_embd;
++            std::memcpy(dest, src, n_embd * sizeof(float));
++        }
++    }
++}
++
+ //
+ // state save/load
+ //
+@@ -2916,6 +3218,7 @@ llama_context_params llama_context_default_params() {
+         /*.op_offload                  =*/ true,
+         /*.swa_full                    =*/ true,
+         /*.kv_unified                  =*/ false,
++        /*.target_model                =*/ nullptr,
+         /*.sampler                     =*/ nullptr,
+         /*.n_sampler                   =*/ 0,
+     };
+@@ -2931,6 +3234,19 @@ llama_context * llama_init_from_model(
+         return nullptr;
+     }
+ 
++    // Auto-setup for EAGLE3: set target embedding if target_model is provided
++    if (model->arch == LLM_ARCH_EAGLE3 && params.target_model) {
++        model->target_tok_embd = params.target_model->tok_embd;
++        LLAMA_LOG_INFO("%s: EAGLE3 auto-setup: using target model's embedding layer\n", __func__);
++    }
++
++    // Auto-setup for DFlash: set target embedding + lm_head if target_model is provided
++    if (model->arch == LLM_ARCH_DFLASH && params.target_model) {
++        model->target_tok_embd = params.target_model->tok_embd;
++        model->target_output   = params.target_model->output;
++        LLAMA_LOG_INFO("%s: DFlash auto-setup: using target model's embedding + lm_head layers\n", __func__);
++    }
++
+     if (params.n_batch == 0 && params.n_ubatch == 0) {
+         LLAMA_LOG_ERROR("%s: n_batch and n_ubatch cannot both be zero\n", __func__);
+         return nullptr;
+@@ -3212,6 +3528,22 @@ int32_t llama_set_adapter_cvec(
+     return res ? 0 : -1;
+ }
+ 
++//
++// eagle3 (tmp)
++//
++
++void llama_set_eagle3(
++        llama_context * ctx,
++        const llama_model * model) {
++    ctx->set_eagle3(model);
++}
++
++void llama_set_dflash(
++        llama_context * ctx,
++        const llama_model * model) {
++    ctx->set_dflash(model);
++}
++
+ //
+ // memory
+ //
+@@ -3524,6 +3856,7 @@ void llama_opt_epoch(
+         callback_eval);
+ }
+ 
++//
+ //
+ // ext
+ //
+@@ -3531,3 +3864,41 @@ void llama_opt_epoch(
+ llama_memory_breakdown llama_get_memory_breakdown(const struct llama_context * ctx) {
+     return ctx->memory_breakdown();
+ }
++
++// EAGLE3 member functions
++//
++
++const float * llama_context::get_eagle3_target_features() const {
++    GGML_ASSERT(!eagle3.target_features.empty() && "EAGLE3 target features not extracted - call llama_encode() on target model first");
++    return eagle3.target_features.data();
++}
++
++void llama_context::set_eagle3_g_embeddings(const float * g_embd, int32_t n_embd, int32_t n_tokens) {
++    GGML_ASSERT(g_embd != nullptr && "g_embeddings cannot be null");
++    GGML_ASSERT(n_embd > 0 && n_tokens > 0 && "invalid dimensions");
++
++    const size_t size = n_embd * n_tokens;
++    eagle3.g_embeddings.resize(size);
++    std::memcpy(eagle3.g_embeddings.data(), g_embd, size * sizeof(float));
++}
++
++//
++// C API wrappers
++//
++
++const float * llama_get_eagle3_target_features(llama_context * ctx) {
++    return ctx->get_eagle3_target_features();
++}
++
++void llama_set_eagle3_g_embeddings(llama_context * ctx, const float * g_embd, int32_t n_embd, int32_t n_tokens) {
++    ctx->set_eagle3_g_embeddings(g_embd, n_embd, n_tokens);
++}
++
++const float * llama_get_dflash_target_features(llama_context * ctx) {
++    return ctx->get_dflash_target_features();
++}
++
++void llama_set_dflash_accumulated_target_ctx(llama_context * ctx, const float * data, int32_t n_embd, int32_t n_tokens) {
++    ctx->set_dflash_accumulated_target_ctx(data, n_embd, n_tokens);
++}
++
+diff --git a/src/llama-context.h b/src/llama-context.h
+index 53c705eaf..86f0d81c0 100644
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -106,6 +106,10 @@ struct llama_context {
+                 int32_t   il_start,
+                 int32_t   il_end);
+ 
++    // TODO: tmp
++    void set_eagle3(const llama_model * model);
++    void set_dflash(const llama_model * model);
++
+     // process a single ubatch with a specific graph type
+     // if memory_context is provided, it will be applied first to the context's memory
+     // ret contains the status of the graph computation
+@@ -222,6 +226,18 @@ public:
+     ggml_cgraph * graph_reserve(
+         uint32_t n_tokens, uint32_t n_seqs, uint32_t n_outputs, const llama_memory_context_i * mctx, bool split_only = false, size_t * sizes = nullptr);
+ 
++    // EAGLE3: Get pointer to target model features extracted for EAGLE3 encoder
++    const float * get_eagle3_target_features() const;
++
++    // EAGLE3: Set g_embeddings from encoder output for decoder input
++    void set_eagle3_g_embeddings(const float * g_embd, int32_t n_embd, int32_t n_tokens);
++
++    // DFlash: Get pointer to target model features extracted for DFlash encoder
++    const float * get_dflash_target_features() const;
++
++    // DFlash: Set accumulated target_ctx from encoder output for decoder input
++    void set_dflash_accumulated_target_ctx(const float * data, int32_t n_embd, int32_t n_tokens);
++
+     bool set_sampler(llama_seq_id seq_id, llama_sampler * sampler);
+ 
+ private:
+@@ -233,6 +249,12 @@ private:
+ 
+     llm_graph_cb graph_get_cb() const;
+ 
++    // EAGLE3: Extract intermediate layer features from target model
++    void extract_eagle3_features(const llama_ubatch & ubatch);
++
++    // DFlash: Extract intermediate layer features from target model
++    void extract_dflash_features(const llama_ubatch & ubatch);
++
+     // TODO: read/write lora adapters and cvec
+     size_t state_write_data(llama_io_write_i & io);
+     size_t state_read_data (llama_io_read_i  & io);
+@@ -253,6 +275,15 @@ private:
+ 
+     llama_cross cross; // TODO: tmp for handling cross-attention - need something better probably
+ 
++    mutable llama_eagle3 eagle3; // EAGLE3 draft model support - stores features from target model
++                                 // mutable because it's modified during graph building (const function)
++
++    mutable llama_dflash dflash;
++
++    // temp fix: avoid DFlash encoder/decoder mis-detection. They share one model_dft,
++    // so shared model fields cannot safely identify the decoder (caused OOM).
++    bool dflash_decoder_ctx = false;
++
+     std::unique_ptr<llama_memory_i> memory;
+ 
+     // decode output (2-dimensional array: [n_outputs][n_vocab])
+diff --git a/src/llama-cparams.h b/src/llama-cparams.h
+index 9d3594741..906bfbe36 100644
+--- a/src/llama-cparams.h
++++ b/src/llama-cparams.h
+@@ -38,6 +38,8 @@ struct llama_cparams {
+     bool warmup;
+     bool op_offload;
+     bool kv_unified;
++    bool eagle3_extract_enabled;  // enable layer extraction for EAGLE3 speculative decoding
++    bool dflash_extract_enabled;  // enable layer extraction for DFlash speculative decoding
+     bool pipeline_parallel;
+ 
+     enum llama_pooling_type pooling_type;
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 2ff23f87c..9fabd242e 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -946,6 +946,8 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
+     loras            (params.loras),
+     mctx             (params.mctx),
+     cross            (params.cross),
++    eagle3           (params.eagle3),
++    dflash           (params.dflash),
+     samplers         (params.samplers),
+     cb_func          (params.cb),
+     res              (params.res),
+diff --git a/src/llama-graph.h b/src/llama-graph.h
+index 5cb1756c6..1925a275d 100644
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -73,6 +73,44 @@ struct llama_cross {
+     std::vector<std::set<llama_seq_id>> seq_ids_enc;
+ };
+ 
++// EAGLE3 support - stores intermediate features from target model
++struct llama_eagle3 {
++    // Configuration: which layers to extract from target model
++    std::vector<int> extract_layer_indices;
++
++    // Extracted features from target model (for encoder input)
++    // Concatenated [layer_l, layer_m, layer_h] embeddings
++    // Shape: [n_layers * n_embd, n_tokens] where n_layers = extract_layer_indices.size()
++    std::vector<float> target_features;
++
++    // Encoder output (for decoder input)
++    std::vector<float> g_embeddings;
++
++    // Tensor references for feature extraction from target model
++    std::vector<ggml_tensor *> extract_tensors;
++
++    // Clear all stored data
++    void clear() {
++        target_features.clear();
++        g_embeddings.clear();
++        extract_tensors.clear();
++    }
++};
++
++// DFlash intermediate results struct (similar to Eagle3)
++struct llama_dflash {
++    std::vector<int> extract_layer_indices;
++
++    std::vector<float> target_features;
++
++    std::vector<ggml_tensor *> extract_tensors;
++
++    void clear() {
++        target_features.clear();
++        extract_tensors.clear();
++    }
++};
++
+ struct llm_graph_params;
+ 
+ //
+@@ -544,6 +582,8 @@ struct llm_graph_params {
+     const llama_adapter_loras    * loras;
+     const llama_memory_context_i * mctx;
+     const llama_cross            * cross;
++    llama_eagle3                 * eagle3;  // non-const: we write extracted features here
++    llama_dflash                 * dflash;
+ 
+     std::map<llama_seq_id, llama_sampler *> samplers;
+ 
+@@ -758,6 +798,8 @@ struct llm_graph_context {
+     const llama_adapter_loras    * loras;
+     const llama_memory_context_i * mctx;
+     const llama_cross            * cross;
++    llama_eagle3                 * eagle3;  // non-const: we write extracted features here
++    llama_dflash                 * dflash;
+ 
+     std::map<llama_seq_id, llama_sampler *> samplers;
+ 
+diff --git a/src/llama-hparams.h b/src/llama-hparams.h
+index ac7f9ee86..2583cf871 100644
+--- a/src/llama-hparams.h
++++ b/src/llama-hparams.h
+@@ -213,6 +213,21 @@ struct llama_hparams {
+     // gemma4 per-layer embedding
+     uint32_t n_embd_per_layer = 0;
+ 
++    // EAGLE3 draft model - layer indices to extract from target model
++    // e.g., for 32-layer target: [2, 16, 29] (low, middle, high)
++    std::array<int, 3> eagle3_extract_layers = {0, 0, 0};
++
++    // EAGLE3 draft model - target model hidden size
++    uint32_t eagle3_target_hidden_size = 0;
++
++    // EAGLE3 draft model - apply hidden_norm before storing residual
++    bool eagle3_norm_before_residual = false;
++
++    // DFlash draft model
++    std::array<int, 5> dflash_target_layer_ids = {};
++    uint32_t dflash_block_size     = 16;
++    uint32_t dflash_mask_token_id  = 0;
++
+     // needed by encoder-decoder models (e.g. T5, FLAN-T5)
+     // ref: https://github.com/ggml-org/llama.cpp/pull/8141
+     llama_token dec_start_token_id = LLAMA_TOKEN_NULL;
+diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
+index 4e65a45a5..832fc990c 100644
+--- a/src/llama-model-loader.cpp
++++ b/src/llama-model-loader.cpp
+@@ -503,6 +503,7 @@ namespace GGUFMeta {
+ 
+     // TODO: this is not very clever - figure out something better
+     template bool llama_model_loader::get_key_or_arr<std::array<int, 4>>(enum llm_kv kid, std::array<int, 4> & result, uint32_t n, bool required);
++    template bool llama_model_loader::get_key_or_arr<std::array<int, 5>>(enum llm_kv kid, std::array<int, 5> & result, uint32_t n, bool required); // store DFlash 5 layer ids 
+     template bool llama_model_loader::get_key_or_arr<std::array<uint32_t, 512>>(enum llm_kv kid, std::array<uint32_t, 512> & result, uint32_t n, bool required);
+     template bool llama_model_loader::get_key_or_arr<std::array<float, 512>>(enum llm_kv kid, std::array<float, 512> & result, uint32_t n, bool required);
+ 
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index 9e2a13cbd..a2fbca2bb 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -2758,6 +2758,57 @@ void llama_model::load_hparams(llama_model_loader & ml) {
+                     default: type = LLM_TYPE_UNKNOWN;
+                 }
+             } break;
++        case LLM_ARCH_EAGLE3:
++            {
++                ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
++                // EAGLE3 layer extraction configuration
++                // Use array<int, 4> (has template instantiation), then copy first 3 elements
++                std::array<int, 4> extract_layers_tmp = {};
++                if (!ml.get_key_or_arr(LLM_KV_EAGLE3_EXTRACT_LAYERS, extract_layers_tmp, 3, false)) {
++                    throw std::runtime_error("EAGLE3 model requires 'extract_layers' in GGUF metadata");
++                }
++                std::copy_n(extract_layers_tmp.begin(), 3, hparams.eagle3_extract_layers.begin());
++                LLAMA_LOG_INFO("%s: EAGLE3 extract_layers = [%d, %d, %d]\n", __func__,
++                               hparams.eagle3_extract_layers[0],
++                               hparams.eagle3_extract_layers[1],
++                               hparams.eagle3_extract_layers[2]);
++
++                // EAGLE3 target model hidden size
++                ml.get_key(LLM_KV_EAGLE3_TARGET_HIDDEN_SIZE, hparams.eagle3_target_hidden_size);
++                LLAMA_LOG_INFO("%s: EAGLE3 target_hidden_size = %u (draft n_embd = %u)\n", __func__,
++                               hparams.eagle3_target_hidden_size, hparams.n_embd);
++
++                // EAGLE3 norm_before_residual (optional, default false)
++                // compatible with Readhat eagle3 speculator model
++                ml.get_key(LLM_KV_EAGLE3_NORM_BEFORE_RESIDUAL, hparams.eagle3_norm_before_residual, false);
++                if (hparams.eagle3_norm_before_residual) {
++                    LLAMA_LOG_INFO("%s: EAGLE3 norm_before_residual = true\n", __func__);
++                }
++
++                type = LLM_TYPE_UNKNOWN;
++            } break;
++        case LLM_ARCH_DFLASH:
++            {
++                ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
++
++                ml.get_key(LLM_KV_DFLASH_BLOCK_SIZE, hparams.dflash_block_size, false);
++                ml.get_key(LLM_KV_DFLASH_MASK_TOKEN_ID, hparams.dflash_mask_token_id, false);
++
++                if (!ml.get_key_or_arr(LLM_KV_DFLASH_TARGET_LAYER_IDS, hparams.dflash_target_layer_ids, 5, false)) {
++                    throw std::runtime_error("DFlash model requires 'target_layer_ids' in GGUF metadata");
++                }
++                LLAMA_LOG_INFO("%s: DFlash extract_layers = [%d, %d, %d, %d, %d]\n", __func__,
++                               hparams.dflash_target_layer_ids[0],
++                               hparams.dflash_target_layer_ids[1],
++                               hparams.dflash_target_layer_ids[2],
++                               hparams.dflash_target_layer_ids[3],
++                               hparams.dflash_target_layer_ids[4]);
++
++                LLAMA_LOG_INFO("%s: DFlash block_size = %u, mask_token_id = %u\n",
++                               __func__, hparams.dflash_block_size, hparams.dflash_mask_token_id);
++
++                type = LLM_TYPE_UNKNOWN;
++            } break;
+         case LLM_ARCH_COGVLM:
+             {
+                 ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
+@@ -7254,6 +7305,97 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
+                         layer.ffn_exp_probs_b = create_tensor(tn(LLM_TENSOR_FFN_EXP_PROBS_B, "bias", i), {n_expert}, 0);
+                     }
+                 } break;
++            case LLM_ARCH_EAGLE3:
++                {
++                    const int64_t n_embd_target_features = 3 * hparams.eagle3_target_hidden_size;
++                    const int64_t n_embd_attn_input = 2 * n_embd;
++
++                    // Get vocab size from the d2t tensor in the GGUF file (optional - only needed if EAGLE3 has different vocab_size than target)
++                    // d2t: draft to target vocabulary mapping
++                    int64_t n_draft_vocab = n_vocab;  // Default: same as target vocab
++                    const struct ggml_tensor * d2t_meta = ml.get_tensor_meta("d2t");
++                    if (d2t_meta) {
++                        n_draft_vocab = d2t_meta->ne[0]; // update draft vocab size
++                        d2t = create_tensor(tn(LLM_TENSOR_EAGLE3_D2T), {n_draft_vocab}, 0);
++                        LLAMA_LOG_INFO("%s: EAGLE3 using d2t mapping (draft_vocab_size = %lld)\n", __func__, (long long)n_draft_vocab);
++                    } else {
++                        d2t = nullptr; // no d2t, use default vocab size
++                        LLAMA_LOG_INFO("%s: EAGLE3 without d2t - sharing same vocab_size with target (vocab_size = %lld)\n", __func__, (long long)n_draft_vocab);
++                    }
++
++                    // Feature fusion layer: projects 3 target layers to draft hidden size
++                    fc = create_tensor(tn(LLM_TENSOR_EAGLE3_FC, "weight"), {n_embd_target_features, n_embd}, 0);
++
++                    // Output layer (uses draft vocab size)
++                    output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
++                    output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_draft_vocab}, 0);
++
++                    // Token embeddings (optional - Llama 3.3 70B EAGLE3 has its own)
++                    const struct ggml_tensor * tok_embd_meta = ml.get_tensor_meta(tn(LLM_TENSOR_TOKEN_EMBD, "weight").str().c_str());
++                    if (tok_embd_meta) {
++                        const int64_t n_target_vocab = tok_embd_meta->ne[1];
++                        tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_target_vocab}, 0);
++                        LLAMA_LOG_INFO("%s: EAGLE3 using its own token_embd (vocab = %lld)\n", __func__, (long long)n_target_vocab);
++                    }
++
++                    // Single decoder layer
++                    for (int i = 0; i < n_layer; ++i) {
++                        auto & layer = layers[i];
++
++                        // input_layernorm: applied to token embeddings
++                        layer.attn_norm = create_tensor(tn(LLM_TENSOR_ATTN_NORM, "weight", i), {n_embd}, 0);
++
++                        // Attention takes input_embeds_normed + fused_target_normed as input
++                        layer.wq = create_tensor(tn(LLM_TENSOR_ATTN_Q,   "weight", i), {n_embd_attn_input, n_embd_head_k * n_head}, 0);
++                        layer.wk = create_tensor(tn(LLM_TENSOR_ATTN_K,   "weight", i), {n_embd_attn_input, n_embd_k_gqa}, 0);
++                        layer.wv = create_tensor(tn(LLM_TENSOR_ATTN_V,   "weight", i), {n_embd_attn_input, n_embd_v_gqa}, 0);
++                        layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_embd_head_k * n_head, n_embd}, 0);
++
++                        // EAGLE-3 specific: hidden_norm applied to fused target features
++                        layer.eagle3_hidden_norm = create_tensor(tn(LLM_TENSOR_EAGLE3_HIDDEN_NORM, "weight", i), {n_embd}, 0);
++
++                        layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, "weight", i), {n_embd}, 0);
++                        layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", i), {n_embd,   n_ff}, 0);
++                        layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", i), {  n_ff, n_embd}, 0);
++                        layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", i), {n_embd,   n_ff}, 0);
++
++                        // rope_freqs for llama3 rope scaling (optional - only if EAGLE3 config has rope_scaling)
++                        layer.rope_freqs = create_tensor(tn(LLM_TENSOR_ROPE_FREQS, "weight", i), {n_rot/2}, TENSOR_NOT_REQUIRED);
++                    }
++                } break;
++            case LLM_ARCH_DFLASH:
++                {
++                    const int64_t n_target_layer_ids = (int64_t)hparams.dflash_target_layer_ids.size();
++                    const int64_t n_embd_target_features = n_target_layer_ids * n_embd;
++
++                    fc = create_tensor(tn(LLM_TENSOR_DFLASH_FC, "weight"), {n_embd_target_features, n_embd}, 0);
++                    dflash_hidden_norm = create_tensor(tn(LLM_TENSOR_DFLASH_HIDDEN_NORM, "weight"), {n_embd}, 0);
++                    output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
++
++                    for (int i = 0; i < n_layer; ++i) {
++                        auto & layer = layers[i];
++
++                        layer.attn_norm = create_tensor(tn(LLM_TENSOR_ATTN_NORM, "weight", i), {n_embd}, 0);
++
++                        layer.wq = create_tensor(tn(LLM_TENSOR_ATTN_Q, "weight", i), {n_embd, n_embd_head_k * n_head}, 0);
++                        layer.wk = create_tensor(tn(LLM_TENSOR_ATTN_K, "weight", i), {n_embd, n_embd_k_gqa}, 0);
++                        layer.wv = create_tensor(tn(LLM_TENSOR_ATTN_V, "weight", i), {n_embd, n_embd_v_gqa}, 0);
++                        layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_embd_head_k * n_head, n_embd}, 0);
++
++                        layer.bq = create_tensor(tn(LLM_TENSOR_ATTN_Q,   "bias", i), {n_embd_head_k * n_head}, TENSOR_NOT_REQUIRED);
++                        layer.bk = create_tensor(tn(LLM_TENSOR_ATTN_K,   "bias", i), {n_embd_k_gqa},          TENSOR_NOT_REQUIRED);
++                        layer.bv = create_tensor(tn(LLM_TENSOR_ATTN_V,   "bias", i), {n_embd_v_gqa},          TENSOR_NOT_REQUIRED);
++                        layer.bo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "bias", i), {n_embd},                TENSOR_NOT_REQUIRED);
++
++                        layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", i), {n_embd_head_k}, 0);
++                        layer.attn_k_norm = create_tensor(tn(LLM_TENSOR_ATTN_K_NORM, "weight", i), {n_embd_head_k}, 0);
++
++                        layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, "weight", i), {n_embd}, 0);
++                        layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", i), {n_embd, n_ff}, 0);
++                        layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", i), {n_ff, n_embd}, 0);
++                        layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", i), {n_embd, n_ff}, 0);
++                    }
++                } break;
+             case LLM_ARCH_KIMI_LINEAR:
+                 {
+                     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
+@@ -8441,6 +8583,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params,
+         case LLM_ARCH_LLADA:
+         case LLM_ARCH_LLADA_MOE:
+         case LLM_ARCH_RND1:
++        case LLM_ARCH_DFLASH: // current DFlash decoder doesn't support KV-cache due to cross_attn + self_attn (no mask) 
+             {
+                 res = nullptr;
+             } break;
+@@ -9031,6 +9174,22 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
+             {
+                 llm = std::make_unique<llm_build_minimax_m2>(*this, params);
+             } break;
++        case LLM_ARCH_EAGLE3:
++            {
++                if (params.gtype == LLM_GRAPH_TYPE_ENCODER) {
++                    llm = std::make_unique<llm_build_eagle3_encode>(*this, params);
++                } else {
++                    llm = std::make_unique<llm_build_eagle3_decode>(*this, params);
++                }
++            } break;
++        case LLM_ARCH_DFLASH:
++            {
++                if (params.gtype == LLM_GRAPH_TYPE_ENCODER) {
++                    llm = std::make_unique<llm_build_dflash_encode>(*this, params);
++                } else {
++                    llm = std::make_unique<llm_build_dflash_decode>(*this, params);
++                }
++            } break;
+         case LLM_ARCH_COGVLM:
+             {
+                 llm = std::make_unique<llm_build_cogvlm>(*this, params);
+@@ -9161,6 +9320,14 @@ int32_t llama_model_n_swa(const llama_model * model) {
+     return model->hparams.n_swa;
+ }
+ 
++int32_t llama_model_dflash_block_size(const llama_model * model) {
++    return (int32_t) model->hparams.dflash_block_size;
++}
++
++int32_t llama_model_dflash_mask_token_id(const llama_model * model) {
++    return (int32_t) model->hparams.dflash_mask_token_id;
++}
++
+ uint32_t llama_model_n_cls_out(const struct llama_model * model) {
+     return model->hparams.n_cls_out;
+ }
+@@ -9250,6 +9417,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
+         case LLM_ARCH_ERNIE4_5_MOE:
+         case LLM_ARCH_MISTRAL3:
+         case LLM_ARCH_MISTRAL4:
++        case LLM_ARCH_EAGLE3:
+         case LLM_ARCH_LLAMA_EMBED:
+         case LLM_ARCH_MAINCODER:
+         case LLM_ARCH_GLM_DSA:
+@@ -9274,6 +9442,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
+         case LLM_ARCH_QWEN2MOE:
+         case LLM_ARCH_QWEN3:
+         case LLM_ARCH_QWEN3MOE:
++        case LLM_ARCH_DFLASH:
+         case LLM_ARCH_LLADA_MOE:
+         case LLM_ARCH_RND1:
+         case LLM_ARCH_OLMO2:
+diff --git a/src/llama-model.h b/src/llama-model.h
+index 5f101bd63..06e2c2e3a 100644
+--- a/src/llama-model.h
++++ b/src/llama-model.h
+@@ -258,6 +258,12 @@ struct llama_layer {
+     struct ggml_tensor * wo_enc    = nullptr;
+     struct ggml_tensor * wqkv_gate = nullptr;
+ 
++    // attention bias
++    struct ggml_tensor * bq   = nullptr;
++    struct ggml_tensor * bk   = nullptr;
++    struct ggml_tensor * bv   = nullptr;
++    struct ggml_tensor * bo   = nullptr;
++
+     // relative position bias
+     struct ggml_tensor * attn_rel_b       = nullptr;
+     struct ggml_tensor * attn_rel_b_enc   = nullptr;
+@@ -465,6 +471,9 @@ struct llama_layer {
+     struct ggml_tensor * ffn_act_beta    = nullptr;
+     struct ggml_tensor * ffn_act_eps     = nullptr;
+ 
++    // eagle3
++    struct ggml_tensor * eagle3_hidden_norm = nullptr;
++
+     // Kimi Linear KDA (using ssm_ prefix for consistency)
+     // Note: ssm_dt_b already exists above (mamba bias), reused for Kimi dt_bias
+     struct ggml_tensor * ssm_q_conv = nullptr;
+@@ -550,6 +559,17 @@ struct llama_model {
+     struct ggml_tensor * per_layer_model_proj = nullptr;
+     struct ggml_tensor * per_layer_proj_norm  = nullptr;
+ 
++    // eagle3
++    struct ggml_tensor * fc  = nullptr;  // feature fusion layer
++    struct ggml_tensor * d2t = nullptr;  // draft to target vocabulary mapping
++    // Reference to target model's embedding layer
++    // This allows EAGLE3 to use target model's embeddings without copying
++    struct ggml_tensor * target_tok_embd = nullptr;
++
++    // dflash
++    struct ggml_tensor * dflash_hidden_norm = nullptr;
++    struct ggml_tensor * target_output = nullptr;  // reference to target model's lm_head
++
+     std::vector<llama_layer> layers;
+ 
+     //Dense linear projections for SentenceTransformers models like embeddinggemma
+diff --git a/src/models/dflash.cpp b/src/models/dflash.cpp
+new file mode 100644
+index 000000000..82a13ccc8
+--- /dev/null
++++ b/src/models/dflash.cpp
+@@ -0,0 +1,161 @@
++#include "models.h"
++
++ggml_tensor * llm_build_dflash_encode::build_inp_embd() const {
++    const int64_t n_target_layer_ids = (int64_t) hparams.dflash_target_layer_ids.size();
++    const int64_t n_embd_target_features = n_target_layer_ids * n_embd;
++
++    auto inp_target = std::make_unique<llm_graph_input_embd>(n_embd_target_features);
++    inp_target->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd_target_features, n_tokens);
++    ggml_set_input(inp_target->embd);
++
++    ggml_tensor * cur = inp_target->embd;
++    cb(cur, "inp_embd", -1);
++
++    res->add_input(std::move(inp_target));
++
++    return cur;
++}
++
++llm_build_dflash_encode::llm_build_dflash_encode(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
++    ggml_tensor * cur = build_inp_embd();
++
++    cur = build_lora_mm(model.fc, cur);
++    cb(cur, "fc_out", -1);
++
++    cur = build_norm(cur, model.dflash_hidden_norm, NULL, LLM_NORM_RMS, -1);
++    cb(cur, "hidden_norm_out", -1);
++
++    res->t_embd = cur;
++
++    ggml_build_forward_expand(gf, cur);
++}
++
++llm_build_dflash_decode::llm_build_dflash_decode(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
++    const int64_t n_embd_head = hparams.n_embd_head_v();
++
++    GGML_ASSERT(n_embd_head == hparams.n_embd_head_k());
++
++    // Noise tokens [MASK]
++    GGML_ASSERT(model.target_tok_embd != nullptr && "DFlash decoder requires target model's tok_embd");
++    ggml_tensor * noise_embd = build_inp_embd(model.target_tok_embd);
++    cb(noise_embd, "inp_noise_embd", -1);
++
++    // Target context via llama_cross (filled from accumulated_target_ctx), graph rebuilds every step
++    ggml_tensor * target_ctx = build_inp_cross_embd();
++    const int64_t n_ctx = target_ctx->ne[1];
++
++    ggml_tensor * inpL = noise_embd;
++
++    const int64_t n_tokens_kv = n_ctx + n_tokens;
++
++    // Position tensor covering target_ctx + noise
++    ggml_tensor * inp_pos_full = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens_kv);
++    ggml_set_input(inp_pos_full);
++    cb(inp_pos_full, "inp_pos_full", -1);
++
++    // Q positions: last n_tokens entries (noise only)
++    ggml_tensor * inp_pos_q = ggml_view_1d(ctx0, inp_pos_full, n_tokens,
++            n_ctx * ggml_element_size(inp_pos_full));
++
++    const float kq_scale = 1.0f/sqrtf(float(n_embd_head));
++
++    for (int il = 0; il < n_layer; ++il) {
++        const auto & layer = model.layers[il];
++
++        ggml_tensor * noise_norm = build_norm(inpL, layer.attn_norm, NULL, LLM_NORM_RMS, il);
++        cb(noise_norm, "noise_norm", il);
++
++        // Q from noise only
++        ggml_tensor * Qcur = build_lora_mm(layer.wq, noise_norm);
++        if (layer.bq) { Qcur = ggml_add(ctx0, Qcur, layer.bq); }
++        cb(Qcur, "Qcur", il);
++
++        // K = concat(k_proj(target_ctx), k_proj(noise))
++        ggml_tensor * K_tgt   = build_lora_mm(layer.wk, target_ctx);
++        ggml_tensor * K_noise = build_lora_mm(layer.wk, noise_norm);
++        if (layer.bk) {
++            K_tgt   = ggml_add(ctx0, K_tgt,   layer.bk);
++            K_noise = ggml_add(ctx0, K_noise, layer.bk);
++        }
++        ggml_tensor * Kcur = ggml_concat(ctx0, K_tgt, K_noise, 1);
++        cb(Kcur, "Kcur", il);
++
++        // V = concat(v_proj(target_ctx), v_proj(noise))
++        ggml_tensor * V_tgt   = build_lora_mm(layer.wv, target_ctx);
++        ggml_tensor * V_noise = build_lora_mm(layer.wv, noise_norm);
++        if (layer.bv) {
++            V_tgt   = ggml_add(ctx0, V_tgt,   layer.bv);
++            V_noise = ggml_add(ctx0, V_noise, layer.bv);
++        }
++        ggml_tensor * Vcur = ggml_concat(ctx0, V_tgt, V_noise, 1);
++        cb(Vcur, "Vcur", il);
++
++        Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head,    n_tokens);
++        Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens_kv);
++        Vcur = ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv, n_tokens_kv);
++
++        Qcur = build_norm(Qcur, layer.attn_q_norm, NULL, LLM_NORM_RMS, il);
++        Kcur = build_norm(Kcur, layer.attn_k_norm, NULL, LLM_NORM_RMS, il);
++        cb(Qcur, "Qcur_normed", il);
++        cb(Kcur, "Kcur_normed", il);
++
++        // RoPE: K uses full positions [0..n_ctx+n_tokens-1], Q uses last n_tokens
++        Kcur = ggml_rope_ext(
++                ctx0, Kcur, inp_pos_full, nullptr,
++                n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
++                ext_factor, attn_factor, beta_fast, beta_slow
++                );
++        cb(Kcur, "Kcur_rope", il);
++
++        Qcur = ggml_rope_ext(
++                ctx0, Qcur, inp_pos_q, nullptr,
++                n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
++                ext_factor, attn_factor, beta_fast, beta_slow
++                );
++        cb(Qcur, "Qcur_rope", il);
++
++        // Full attention (no causal mask)
++        ggml_build_forward_expand(gf, Qcur);
++        ggml_build_forward_expand(gf, Kcur);
++        ggml_build_forward_expand(gf, Vcur);
++
++        ggml_tensor * cur = build_attn_mha(Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, nullptr, kq_scale, il);
++        cb(cur, "kqv_out", il);
++
++        cur = build_lora_mm(layer.wo, cur);
++        if (layer.bo) { cur = ggml_add(ctx0, cur, layer.bo); }
++        cur = ggml_add(ctx0, cur, inpL);
++        cb(cur, "attn_res", il);
++
++        ggml_tensor * ffn_inp = cur;
++        cur = build_norm(cur, layer.ffn_norm, NULL, LLM_NORM_RMS, il);
++        cb(cur, "ffn_norm", il);
++
++        cur = build_ffn(cur,
++                layer.ffn_up,   NULL, NULL,
++                layer.ffn_gate, NULL, NULL,
++                layer.ffn_down, NULL, NULL,
++                NULL,
++                LLM_FFN_SILU, LLM_FFN_PAR, il);
++        cb(cur, "ffn_out", il);
++
++        cur = ggml_add(ctx0, cur, ffn_inp);
++        cb(cur, "l_out", il);
++
++        inpL = cur;
++    }
++
++    ggml_tensor * cur = inpL;
++    cur = build_norm(cur, model.output_norm, NULL, LLM_NORM_RMS, -1);
++    cb(cur, "result_norm", -1);
++
++    res->t_embd = cur;
++
++    if (model.target_output) {
++        cur = build_lora_mm(model.target_output, cur);
++        cb(cur, "result_output", -1);
++        res->t_logits = cur;
++    }
++
++    ggml_build_forward_expand(gf, cur);
++}
+\ No newline at end of file
+diff --git a/src/models/eagle3.cpp b/src/models/eagle3.cpp
+new file mode 100644
+index 000000000..69ac3be8c
+--- /dev/null
++++ b/src/models/eagle3.cpp
+@@ -0,0 +1,186 @@
++#include "models.h"
++
++ggml_tensor * llm_build_eagle3_encode::build_inp_embd() const {
++    const int64_t n_embd_target_features = 3 * hparams.eagle3_target_hidden_size;
++
++    ggml_tensor * cur = nullptr;
++
++    // Input: Target model features (3 layers concatenated: low, mid, high)
++    // Data will be provided via ubatch->embd in encode_eagle3_features()
++    auto inp_target = std::make_unique<llm_graph_input_embd>(n_embd_target_features);
++    inp_target->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd_target_features, n_tokens);
++    ggml_set_input(inp_target->embd);
++
++    cur = inp_target->embd;
++    cb(cur, "inp_embd", -1);
++
++    res->add_input(std::move(inp_target));
++
++    return cur;
++}
++
++// EAGLE3 Encoder: processes target model features through feature fusion layer
++// Input: target_features e.g. [12288, n_tokens] from target model layers low, middle, high
++// Output: g_embeddings e.g. [4096, n_tokens] stored in context
++llm_build_eagle3_encode::llm_build_eagle3_encode(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
++    ggml_tensor * cur = nullptr;
++
++    cur = build_inp_embd();
++
++    // Feature fusion layer
++    cur = build_lora_mm(model.fc, cur);
++    cb(cur, "fc_out", -1);
++
++    // Output: g_embeddings e.g. [4096, n_tokens]
++    res->t_embd = cur;
++
++    ggml_build_forward_expand(gf, cur);
++}
++
++// EAGLE3 Decoder: processes draft tokens using g_embeddings from encoder
++// Input: draft tokens + g_embeddings from encoder
++// Output: draft logits
++llm_build_eagle3_decode::llm_build_eagle3_decode(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
++    const int64_t n_embd_head = hparams.n_embd_head_v();
++
++    GGML_ASSERT(n_embd_head == hparams.n_embd_head_k());
++    GGML_ASSERT(n_layer == 1);  // EAGLE-3 has only one decoder layer
++
++    ggml_tensor * cur;
++    ggml_tensor * inpL;
++
++    // EAGLE3 Decoder receives:
++    // 1. Token embeddings (e.g.from EAGLE3's own tok_embd for Llama 3.3 70B, or target model for Llama 3.1 8B)
++    // 2. g_embeddings from encoder
++    // Choose token_embd_eagle3: prefer EAGLE3's own if available (Llama 3.3 70B), else use target's (Llama 3.1 8B)
++    ggml_tensor * token_embd_eagle3 = (model.tok_embd != nullptr) ? model.tok_embd : model.target_tok_embd;
++    GGML_ASSERT(token_embd_eagle3 != nullptr && "EAGLE3 decoder requires token embeddings (own or from target model)");
++    ggml_tensor * inp_embd = build_inp_embd(token_embd_eagle3);
++    cb(inp_embd, "inp_embd", -1);
++
++    // TODO: refactor into llm_graph_input
++    ggml_tensor * inp_g = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd, n_tokens);
++    ggml_set_input(inp_g);
++    cb(inp_g, "inp_g_embeddings", -1); // TODO: do not change the name! refactor into llm_graph_input
++
++    inpL = inp_g;
++
++    // inp_pos - contains the positions
++    ggml_tensor * inp_pos = build_inp_pos();
++
++    auto * inp_attn = build_attn_inp_kv();
++
++    const float kq_scale = 1.0f/sqrtf(float(n_embd_head));
++
++    ggml_tensor * inp_out_ids = build_inp_out_ids();
++
++    // Single decoder layer (il = 0)
++    const int il = 0;
++    {
++        // Apply input_layernorm to the token embeddings
++        ggml_tensor * embd_norm = build_norm(inp_embd,
++                model.layers[il].attn_norm, NULL,
++                LLM_NORM_RMS, il);
++        cb(embd_norm, "embd_norm", il);
++
++        // Apply hidden_norm to inp_g
++        ggml_tensor * g_norm = build_norm(inp_g,
++                model.layers[il].eagle3_hidden_norm, NULL,
++                LLM_NORM_RMS, -1);
++        cb(g_norm, "g_norm", il);
++
++        // norm_before_residual: determines what goes into the residual connection (compatible with Readhat eagle3 speculator model)
++        // - false (default): use raw inp_g for residual
++        // - true: use normalized g_norm for residual
++        // inpL is the concatenated input (normalized inp_embd + normalized inp_g)
++        ggml_tensor * inpSA = hparams.eagle3_norm_before_residual ? g_norm : inpL;
++
++        // Concatenate normalized inp_embd and normalized inp_g
++        cur = ggml_concat(ctx0, embd_norm, g_norm, il);
++        cb(cur, "concat_embd", il);
++
++        // Self-attention with concatenated input
++        ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, cur);
++        cb(Qcur, "Qcur", il);
++
++        ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, cur);
++        cb(Kcur, "Kcur", il);
++
++        ggml_tensor * Vcur = build_lora_mm(model.layers[il].wv, cur);
++        cb(Vcur, "Vcur", il);
++
++        Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head,    n_tokens);
++        Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens);
++        Vcur = ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv, n_tokens);
++
++        // rope freq factors, returns nullptr if not available
++        ggml_tensor * rope_factors = model.get_rope_factors(cparams, il);
++
++        // RoPE
++        Qcur = ggml_rope_ext(
++                ctx0, Qcur, inp_pos, rope_factors,
++                n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
++                ext_factor, attn_factor, beta_fast, beta_slow
++                );
++        Kcur = ggml_rope_ext(
++                ctx0, Kcur, inp_pos, rope_factors,
++                n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
++                ext_factor, attn_factor, beta_fast, beta_slow
++                );
++
++        cb(Qcur, "Qcur_rope", il);
++        cb(Kcur, "Kcur_rope", il);
++
++        cur = build_attn(inp_attn,
++                model.layers[il].wo, NULL, nullptr,
++                Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
++
++        if (inp_out_ids) {
++            cur   = ggml_get_rows(ctx0,   cur, inp_out_ids);
++            inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
++        }
++
++        // Add residual and update it
++        ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
++        cb(ffn_inp, "ffn_inp", il);
++
++        // Apply FFN norm to the sum
++        cur = build_norm(ffn_inp,
++                model.layers[il].ffn_norm, NULL,
++                LLM_NORM_RMS, il);
++        cb(cur, "post_attn_norm", il);
++
++        cur = build_ffn(cur,
++                model.layers[il].ffn_up,   NULL, NULL,
++                model.layers[il].ffn_gate, NULL, NULL,
++                model.layers[il].ffn_down, NULL, NULL,
++                NULL,
++                LLM_FFN_SILU, LLM_FFN_PAR, il);
++        cb(cur, "ffn_out", il);
++
++        // Output norm with residual
++        cur = ggml_add(ctx0, cur, ffn_inp);
++        cb(cur, "eagle3_prenorm", il);
++
++        inpL = cur;
++    }
++
++    cur = inpL;
++
++    // Output prenorm state (for next token's g_embeddings in autoregressive generation)
++    ggml_set_output(cur);
++    res->t_embd = cur;
++
++    cur = build_norm(cur,
++            model.output_norm, NULL,
++            LLM_NORM_RMS, -1);
++    cb(cur, "result_norm", -1);
++
++    // lm_head - projects to draft vocabulary
++    cur = build_lora_mm(model.output, cur);
++
++    cb(cur, "result_output", -1);
++    res->t_logits = cur;
++
++    ggml_build_forward_expand(gf, cur);
++}
+diff --git a/src/models/llama.cpp b/src/models/llama.cpp
+index ddaa6c40f..19ed4d07c 100644
+--- a/src/models/llama.cpp
++++ b/src/models/llama.cpp
+@@ -31,6 +31,16 @@ llm_build_llama<embed>::llm_build_llama(const llama_model & model, const llm_gra
+     for (int il = 0; il < n_layer; ++il) {
+         ggml_tensor * inpSA = inpL;
+ 
++        // EAGLE3: Extract intermediate layer features from target model at layer INPUT
++        if (eagle3 && cparams.eagle3_extract_enabled && !eagle3->extract_layer_indices.empty()) {
++            static const char * eagle3_extract_names[] = {"eagle3_extract_0", "eagle3_extract_1", "eagle3_extract_2"};
++            for (size_t i = 0; i < eagle3->extract_layer_indices.size() && i < 3; ++i) {
++                if (eagle3->extract_layer_indices[i] == il) {
++                    cb(inpL, eagle3_extract_names[i], il);
++                    break;
++                }
++            }
++        }
+         // norm
+         cur = build_norm(inpL,
+                 model.layers[il].attn_norm, NULL,
+diff --git a/src/models/models.h b/src/models/models.h
+index 94991c55f..062e6ff62 100644
+--- a/src/models/models.h
++++ b/src/models/models.h
+@@ -202,6 +202,26 @@ struct llm_build_dream : public llm_graph_context {
+     llm_build_dream(const llama_model & model, const llm_graph_params & params);
+ };
+ 
++struct llm_build_eagle3_encode : public llm_graph_context {
++    llm_build_eagle3_encode(const llama_model & model, const llm_graph_params & params);
++private:
++    ggml_tensor * build_inp_embd() const;
++};
++
++struct llm_build_eagle3_decode : public llm_graph_context {
++    llm_build_eagle3_decode(const llama_model & model, const llm_graph_params & params);
++};
++
++struct llm_build_dflash_encode : public llm_graph_context {
++    llm_build_dflash_encode(const llama_model & model, const llm_graph_params & params);
++private:
++    ggml_tensor * build_inp_embd() const;
++};
++
++struct llm_build_dflash_decode : public llm_graph_context {
++    llm_build_dflash_decode(const llama_model & model, const llm_graph_params & params);
++};
++
+ struct llm_build_ernie4_5 : public llm_graph_context {
+     llm_build_ernie4_5(const llama_model & model, const llm_graph_params & params);
+ };
+diff --git a/src/models/openai-moe-iswa.cpp b/src/models/openai-moe-iswa.cpp
+index 50992b8d5..db7492a68 100644
+--- a/src/models/openai-moe-iswa.cpp
++++ b/src/models/openai-moe-iswa.cpp
+@@ -19,6 +19,30 @@ llm_build_openai_moe_iswa::llm_build_openai_moe_iswa(const llama_model & model,
+ 
+         ggml_tensor * inpSA = inpL;
+ 
++        // EAGLE3: Extract intermediate layer features from target model at layer INPUT
++        if (eagle3 && cparams.eagle3_extract_enabled && !eagle3->extract_layer_indices.empty()) {
++            static const char * eagle3_extract_names[] = {"eagle3_extract_0", "eagle3_extract_1", "eagle3_extract_2"};
++            for (size_t i = 0; i < eagle3->extract_layer_indices.size() && i < 3; ++i) {
++                if (eagle3->extract_layer_indices[i] == il) {
++                    cb(inpL, eagle3_extract_names[i], il);
++                    break;
++                }
++            }
++        }
++        
++        // DFlash: Extract intermediate layer features from target model at layer INPUT
++        if (dflash && cparams.dflash_extract_enabled && !dflash->extract_layer_indices.empty()) {
++            static const char * dflash_extract_names[] = {
++                "dflash_extract_0", "dflash_extract_1", "dflash_extract_2",
++                "dflash_extract_3", "dflash_extract_4"
++            };
++            for (size_t i = 0; i < dflash->extract_layer_indices.size() && i < 5; ++i) {
++                if (dflash->extract_layer_indices[i] == il) {
++                    cb(inpL, dflash_extract_names[i], il);
++                    break;
++                }
++            }
++        }
+         // norm
+         cur = build_norm(inpL,
+                 model.layers[il].attn_norm, nullptr,
+diff --git a/src/models/qwen3.cpp b/src/models/qwen3.cpp
+index e6f1fc81d..fa8c39402 100644
+--- a/src/models/qwen3.cpp
++++ b/src/models/qwen3.cpp
+@@ -21,6 +21,31 @@ llm_build_qwen3::llm_build_qwen3(const llama_model & model, const llm_graph_para
+     for (int il = 0; il < n_layer; ++il) {
+         ggml_tensor * inpSA = inpL;
+ 
++        // EAGLE3: Extract intermediate layer features from target model at layer INPUT
++        if (eagle3 && cparams.eagle3_extract_enabled && !eagle3->extract_layer_indices.empty()) {
++                static const char * eagle3_extract_names[] = {"eagle3_extract_0", "eagle3_extract_1", "eagle3_extract_2"};
++                for (size_t i = 0; i < eagle3->extract_layer_indices.size() && i < 3; ++i) {
++                    if (eagle3->extract_layer_indices[i] == il) {
++                        cb(inpL, eagle3_extract_names[i], il);
++                        break;
++                    }
++                }
++            }
++
++        // DFlash: Extract intermediate layer features from target model at layer INPUT
++        if (dflash && cparams.dflash_extract_enabled && !dflash->extract_layer_indices.empty()) {
++            static const char * dflash_extract_names[] = {
++                "dflash_extract_0", "dflash_extract_1", "dflash_extract_2",
++                "dflash_extract_3", "dflash_extract_4"
++            };
++            for (size_t i = 0; i < dflash->extract_layer_indices.size() && i < 5; ++i) {
++                if (dflash->extract_layer_indices[i] == il) {
++                    cb(inpL, dflash_extract_names[i], il);
++                    break;
++                }
++            }
++        }
++
+         // norm
+         cur = build_norm(inpL,
+                 model.layers[il].attn_norm, NULL,
+diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
+index 87790f08e..19d3d9561 100644
+--- a/src/models/qwen35.cpp
++++ b/src/models/qwen35.cpp
+@@ -26,6 +26,20 @@ llm_build_qwen35::llm_build_qwen35(const llama_model & model, const llm_graph_pa
+     for (int il = 0; il < n_layer; ++il) {
+         ggml_tensor * inpSA = inpL;
+ 
++        // DFlash: Extract intermediate layer features from target model
++        if (dflash && cparams.dflash_extract_enabled && !dflash->extract_layer_indices.empty()) {
++            static const char * dflash_extract_names[] = {
++                "dflash_extract_0", "dflash_extract_1", "dflash_extract_2",
++                "dflash_extract_3", "dflash_extract_4"
++            };
++            for (size_t i = 0; i < dflash->extract_layer_indices.size() && i < 5; ++i) {
++                if (dflash->extract_layer_indices[i] == il) {
++                    cb(inpL, dflash_extract_names[i], il);
++                    break;
++                }
++            }
++        }
++
+         cur = build_norm(inpL, model.layers[il].attn_norm, nullptr, LLM_NORM_RMS, il);
+         cb(cur, "attn_norm", il);
+ 
+diff --git a/src/models/qwen35moe.cpp b/src/models/qwen35moe.cpp
+index 7dc6a23c7..b367bdecf 100644
+--- a/src/models/qwen35moe.cpp
++++ b/src/models/qwen35moe.cpp
+@@ -26,6 +26,20 @@ llm_build_qwen35moe::llm_build_qwen35moe(const llama_model & model, const llm_gr
+     for (int il = 0; il < n_layer; ++il) {
+         ggml_tensor * inpSA = inpL;
+ 
++        // DFlash: Extract intermediate layer features from target model
++        if (dflash && cparams.dflash_extract_enabled && !dflash->extract_layer_indices.empty()) {
++            static const char * dflash_extract_names[] = {
++                "dflash_extract_0", "dflash_extract_1", "dflash_extract_2",
++                "dflash_extract_3", "dflash_extract_4"
++            };
++            for (size_t i = 0; i < dflash->extract_layer_indices.size() && i < 5; ++i) {
++                if (dflash->extract_layer_indices[i] == il) {
++                    cb(inpL, dflash_extract_names[i], il);
++                    break;
++                }
++            }
++        }
++
+         cur = build_norm(inpL, model.layers[il].attn_norm, nullptr, LLM_NORM_RMS, il);
+         cb(cur, "attn_norm", il);
+ 
+diff --git a/src/models/qwen3moe.cpp b/src/models/qwen3moe.cpp
+index dc554b5b3..bdb67332e 100644
+--- a/src/models/qwen3moe.cpp
++++ b/src/models/qwen3moe.cpp
+@@ -21,6 +21,17 @@ llm_build_qwen3moe::llm_build_qwen3moe(const llama_model & model, const llm_grap
+     for (int il = 0; il < n_layer; ++il) {
+         ggml_tensor * inpSA = inpL;
+ 
++        // EAGLE3: Extract intermediate layer features from target model at layer INPUT
++        if (eagle3 && cparams.eagle3_extract_enabled && !eagle3->extract_layer_indices.empty()) {
++                static const char * eagle3_extract_names[] = {"eagle3_extract_0", "eagle3_extract_1", "eagle3_extract_2"};
++                for (size_t i = 0; i < eagle3->extract_layer_indices.size() && i < 3; ++i) {
++                        if (eagle3->extract_layer_indices[i] == il) {
++                        cb(inpL, eagle3_extract_names[i], il);
++                        break;
++                        }
++                }
++        }
++
+         // norm
+         cur = build_norm(inpL,
+                 model.layers[il].attn_norm, NULL,
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index 53f61b5a9..e11be3f4e 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -797,7 +797,18 @@ private:
+             }
+ 
+             params_base.speculative.model_dft = model_dft.get();
++            params_base.speculative.model_tgt = model;
+             params_base.speculative.cparams_dft = common_context_params_to_llama(params_dft);
++
++            if (params_base.speculative.eagle3) {
++                // EAGLE3 current limitation: extracted target features are per-context; multiple slots would overwrite each other
++                if (params_base.n_parallel > 1) {
++                    SRV_ERR("%s", "EAGLE3 speculative decoding is not supported with n_parallel > 1\n");
++                    return false;
++                }
++                llama_set_eagle3(ctx, model_dft.get());
++                SRV_INF("%s", "EAGLE3 feature extraction enabled on target model\n");
++            }
+         }
+ 
+         std::string & mmproj_path = params_base.mmproj.path;
