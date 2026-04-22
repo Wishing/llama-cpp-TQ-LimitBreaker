@@ -2,6 +2,11 @@
 
 # 🚀 llama.cpp TurboQuant Limit Breaker (Gemma 4 & Qwopus Ready)
 
+> [!CAUTION]
+> **CRITICAL: VERSION MISMATCH WILL CAUSE COMPILATION FAILURE OR RUNTIME CRASH.**
+> This patch is strictly designed for **llama.cpp commit `ca7f7b7b`**. Applying it to any other version (newer or older) will likely result in manual conflict resolution failures or memory alignment errors.
+> **DO NOT** attempt to apply this patch without first running `git checkout ca7f7b7b`.
+
 > **Breaking the Physical Laws of 24GB VRAM: Run Gemma-4-31B / Qwopus-27B with 100% GPU full offload on a single RTX 3090, while maintaining 96K - 256K massive context.**
 
 ## 🔍 Why this project?
@@ -31,17 +36,26 @@ As of April 2026, the local deployment of the open-source AI community faces a "
 To ensure the patch is applied perfectly and to avoid compilation errors from upstream API changes, **please strictly lock your repository to the tested specific commit version**.
 
 ### 1. Prepare Repository & Lock Version
+1. Clone the official llama.cpp repository:
+   ```bash
+   git clone https://github.com/ggml-org/llama.cpp.git
+   cd llama.cpp
+   ```
+2. **MUST** lock to this safe version (Validated Commit):
+   ```bash
+   git checkout ca7f7b7b
+   ```
+3. Copy the `llama_turboquant.patch` file from this project into the `llama.cpp` root directory.
+
+4. Apply the patch and build:
+   ```bash
+   git apply llama_turboquant.patch
+   cmake -B build -DGGML_CUDA=ON -DGGML_CUDA_F16=ON
+   cmake --build build --config Release -j $(nproc) --target llama-server
+   ```
+
+### 2. Run Example
 ```bash
-git clone https://github.com/ggml-org/llama.cpp.git
-cd llama.cpp
-
-# MUST lock to this safe version (Build b8728)
-git checkout 5e9c63546
-
-# Apply patch and build
-git apply llama_turboquant.patch
-cmake -B build -DGGML_CUDA=ON -DGGML_CUDA_F16=ON
-cmake --build build --config Release -j $(nproc) --target llama-server
 ./build/bin/llama-server \
     -m /path/to/gemma-4-31B-it-UD-IQ3_XXS.gguf \
     -c 98304 \

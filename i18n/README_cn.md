@@ -1,6 +1,11 @@
-[ 🇺🇸 English](../README.md) · [ 🇨🇳 简体中文](README_cn.md) · [ 🇯🇵 日本語](README_ja.md) · [ 🇰🇷 한국어](README_ko.md) · [ 🇻🇳 Tiếng Việt](README_vi.md) · [ 🇵🇭 Tagalog](README_tl.md) · [ 🇪🇸 Español](README_es.md) · [ 🇵🇹 Português](README_pt.md) · [ 🇮🇹 Italiano](README_it.md) · [ 🇩🇪 Deutsch](README_de.md) · [ 🇫🇷 Français](README_fr.md) · [ 🇸🇦 العربية](README_ar.md) · [ 🇮🇳 हिन्दी](README_hi.md) · [ 🇷🇺 Русский](README_ru.md) · [ 🇧🇩 বাংলা](README_bn.md) · [ 🇮🇱 עברית](README_he.md) · [ 🇵🇱 Polski](README_pl.md) · [ 🇨🇿 Čeština](README_cs.md) · [ 🇳🇱 Nederlands](README_nl.md) · [ 🇹🇷 Türkçe](README_tr.md) · [ 🇺🇦 Українська](README_uk.md) · [ 🇮🇩 Bahasa Indonesia](README_id.md) · [ 🇹🇭 ไทย](README_th.md) · [ 🇵🇰 اردو](README_ur.md) · [ 🇷🇴 Română](README_ro.md) · [ 🇸🇪 Svenska](README_sv.md) · [ 🇬🇷 Ελληνικά](README_el.md) · [ 🇭🇺 Magyar](README_hu.md) · [ 🇫🇮 Suomi](README_fi.md) · [ 🇩🇰 Dansk](README_da.md) · [ 🇳🇴 Norsk](README_no.md)
+[ 🇺🇸 English](../README.md) · [ 🇨🇳 简体中文](README_cn.md) · [ 🇯🇵 日本語](README_ja.md) · [ 🇰🇷 한국어](README_ko.md) · [ 🇻🇳 Tiếng Việt](README_vi.md) · [ 🇵🇭 Tagalog](README_tl.md) · [ 🇪🇸 Español](README_es.md) · [ 🇵🇹 Português](README_pt.md) · [ 🇮🇹 Italiano](README_it.md) · [ 🇩🇪 Deutsch](README_de.md) · [ 🇫🇷 Français](README_fr.md) · [ 🇸🇦 العربية](README_ar.md) · [ 🇮🇳 हिन्दी](README_hi.md) · [ 🇷🇺 Русский](README_ru.md) · [ 🇧🇩 বাংলা](README_bn.md) · [ 🇮🇱 עברית](README_he.md) · [ 🇵🇱 Polski](README_pl.md) · [ 🇨🇿 Čeština](README_cs.md) · [ 🇳🇱 Nederlands](README_nl.md) · [ 🇹🇷 Türkçe](README_tr.md) · [ 🇺🇦 Українська](README_uk.md) · [ 🇮🇩 Bahasa Indonesia](README_id.md) · [ 🇹🇭 ไทย](README_th.md) · [ 🇵🇰 اردو](README_ur.md) · [ 🇷🇴 Română](i18n/README_ro.md) · [ 🇸🇪 Svenska](i18n/README_sv.md) · [ 🇬🇷 Ελληνικά](i18n/README_el.md) · [ 🇭🇺 Magyar](i18n/README_hu.md) · [ 🇫🇮 Suomi](i18n/README_fi.md) · [ 🇩🇰 Dansk](i18n/README_da.md) · [ 🇳🇴 Norsk](i18n/README_no.md)
 
 # 🚀 llama.cpp TurboQuant Limit Breaker (Gemma 4 & Qwopus Ready)
+
+> [!CAUTION]
+> **重要提示：版本不匹配会导致编译失败或运行时崩溃。**
+> 本补丁严格针对 **llama.cpp commit `ca7f7b7b`** 设计。将其应用于任何其他版本（无论新旧）都可能导致手动冲突解决失败或内存对齐错误。
+> **在运行 `git checkout ca7f7b7b` 之前，请勿尝试应用此补丁。**
 
 打破 24G 显存的物理法则：在单张 RTX 3090 上，以 100% GPU 满血卸载运行 Gemma-4-31B / Qwopus-27B，并维持 96K - 256K 超大上下文。
 
@@ -31,17 +36,26 @@
 为了保证补丁能 100% 完美打入，避免官方底层 API 突变带来的编译错误，**请务必严格锁定到经过极限测试的特定 Commit 版本**。
 
 ### 1. 准备代码库与锁定版本
+1. 克隆官方 llama.cpp 代码库：
+   ```bash
+   git clone https://github.com/ggml-org/llama.cpp.git
+   cd llama.cpp
+   ```
+2. **必须**锁定到此安全版本 (Validated Commit)：
+   ```bash
+   git checkout ca7f7b7b
+   ```
+3. 将本项目中的 `llama_turboquant.patch` 文件复制到 `llama.cpp` 的根目录下。
+
+4. 应用补丁并编译：
+   ```bash
+   git apply llama_turboquant.patch
+   cmake -B build -DGGML_CUDA=ON -DGGML_CUDA_F16=ON
+   cmake --build build --config Release -j $(nproc) --target llama-server
+   ```
+
+### 2. 运行示例
 ```bash
-git clone https://github.com/ggml-org/llama.cpp.git
-cd llama.cpp
-
-# 必须锁定到此安全版本 (Build b8728)
-git checkout 5e9c63546
-
-# 愉快地编译和运行
-git apply llama_turboquant.patch
-cmake -B build -DGGML_CUDA=ON -DGGML_CUDA_F16=ON
-cmake --build build --config Release -j $(nproc) --target llama-server
 ./build/bin/llama-server \
     -m /path/to/gemma-4-31B-it-UD-IQ3_XXS.gguf \
     -c 98304 \

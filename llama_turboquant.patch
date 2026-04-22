@@ -1,8 +1,8 @@
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 2e0f46db5..34ab22823 100644
+index 5c0bbe38e..b8e5fd3fc 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
-@@ -387,9 +387,33 @@ const std::vector<ggml_type> kv_cache_types = {
+@@ -391,9 +391,33 @@ const std::vector<ggml_type> kv_cache_types = {
      GGML_TYPE_IQ4_NL,
      GGML_TYPE_Q5_0,
      GGML_TYPE_Q5_1,
@@ -36,7 +36,7 @@ index 2e0f46db5..34ab22823 100644
      for (const auto & type : kv_cache_types) {
          if (ggml_type_name(type) == s) {
              return type;
-@@ -399,9 +423,31 @@ static ggml_type kv_cache_type_from_str(const std::string & s) {
+@@ -403,9 +427,31 @@ static ggml_type kv_cache_type_from_str(const std::string & s) {
  }
  
  static std::string get_all_kv_cache_types() {
@@ -70,10 +70,10 @@ index 2e0f46db5..34ab22823 100644
      return msg.str();
  }
 diff --git a/common/common.cpp b/common/common.cpp
-index 16f78debd..3cf023856 100644
+index f7f33e817..707c5b34a 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
-@@ -1230,6 +1230,306 @@ common_init_result::common_init_result(common_params & params) :
+@@ -1232,6 +1232,306 @@ common_init_result::common_init_result(common_params & params) :
          cparams.n_samplers = pimpl->samplers_seq_config.size();
      }
  
@@ -381,7 +381,7 @@ index 16f78debd..3cf023856 100644
      if (lctx == NULL) {
          LOG_ERR("%s: failed to create context with model '%s'\n", __func__, params.model.path.c_str());
 diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
-index 11d3e8a81..2600a5875 100644
+index 703e37831..c8a587c9b 100644
 --- a/ggml/include/ggml.h
 +++ b/ggml/include/ggml.h
 @@ -429,7 +429,27 @@ extern "C" {
@@ -600,10 +600,10 @@ index f05683b44..c26f615b6 100644
  // Super-block quantization structures
  //
 diff --git a/ggml/src/ggml-cpu/ggml-cpu.cpp b/ggml/src/ggml-cpu/ggml-cpu.cpp
-index ddf1737a3..bc7128ede 100644
+index 49f840be2..81c69b644 100644
 --- a/ggml/src/ggml-cpu/ggml-cpu.cpp
 +++ b/ggml/src/ggml-cpu/ggml-cpu.cpp
-@@ -466,6 +466,35 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
+@@ -468,6 +468,35 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
          case GGML_OP_OUT_PROD:
              return (src0->type == GGML_TYPE_F32 || (ggml_is_quantized(src0->type) && src0->ne[2] == src1->ne[2] && src0->ne[3] == src1->ne[3])) &&
                  src1->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32;
@@ -640,10 +640,10 @@ index ddf1737a3..bc7128ede 100644
              return true;
      }
 diff --git a/ggml/src/ggml-cpu/ops.cpp b/ggml/src/ggml-cpu/ops.cpp
-index 0b5d6c6df..577395ecc 100644
+index a9bc21da6..c3cffd189 100644
 --- a/ggml/src/ggml-cpu/ops.cpp
 +++ b/ggml/src/ggml-cpu/ops.cpp
-@@ -5586,6 +5586,26 @@ void ggml_compute_forward_clamp(
+@@ -5591,6 +5591,26 @@ void ggml_compute_forward_clamp(
          case GGML_TYPE_I32:
          case GGML_TYPE_I64:
          case GGML_TYPE_F64:
@@ -671,7 +671,7 @@ index 0b5d6c6df..577395ecc 100644
              {
                  GGML_ABORT("fatal error");
 diff --git a/ggml/src/ggml-cuda/CMakeLists.txt b/ggml/src/ggml-cuda/CMakeLists.txt
-index 419862101..c0dd796b2 100644
+index b54d4a6b1..5dc29a5da 100644
 --- a/ggml/src/ggml-cuda/CMakeLists.txt
 +++ b/ggml/src/ggml-cuda/CMakeLists.txt
 @@ -111,7 +111,16 @@ if (CUDAToolkit_FOUND)
@@ -816,7 +816,7 @@ index 419862101..c0dd796b2 100644
  
      ggml_add_backend_library(ggml-cuda
 diff --git a/ggml/src/ggml-cuda/convert.cu b/ggml/src/ggml-cuda/convert.cu
-index 79ccfe568..996d9d98d 100644
+index 61630a35a..f697eab12 100644
 --- a/ggml/src/ggml-cuda/convert.cu
 +++ b/ggml/src/ggml-cuda/convert.cu
 @@ -698,6 +698,322 @@ static void convert_unary_cont_cuda(const void * vx, dst_t * y, const int64_t k,
@@ -1142,7 +1142,7 @@ index 79ccfe568..996d9d98d 100644
  to_bf16_cuda_t ggml_get_to_bf16_cuda(ggml_type type) {
      switch (type) {
          case GGML_TYPE_F32:
-@@ -760,11 +1076,24 @@ to_fp16_cuda_t ggml_get_to_fp16_cuda(ggml_type type) {
+@@ -762,6 +1078,14 @@ to_fp16_cuda_t ggml_get_to_fp16_cuda(ggml_type type) {
              return convert_unary_cont_cuda<float>;
          case GGML_TYPE_BF16:
              return convert_unary_cont_cuda<nv_bfloat16>;
@@ -1157,16 +1157,6 @@ index 79ccfe568..996d9d98d 100644
          default:
              return nullptr;
      }
- }
- 
-+// ============================================================
-+// TBQ _4 → spatial f16: fused dequant + cooperative IWHT
-+// 1 CUDA block = 1 TBQ block (576 elements). 256 threads cooperate on IWHT butterfly.
-+// (duplicate removed — definitions above)
-+
- to_fp32_cuda_t ggml_get_to_fp32_cuda(ggml_type type) {
-     switch (type) {
-         case GGML_TYPE_Q4_0:
 diff --git a/ggml/src/ggml-cuda/cpy-utils.cuh b/ggml/src/ggml-cuda/cpy-utils.cuh
 index 7697c292d..c912991d4 100644
 --- a/ggml/src/ggml-cuda/cpy-utils.cuh
@@ -3833,10 +3823,10 @@ index beeb52389..f137e136b 100644
 +    // Q WHT buffer is persistent (thread_local), no free needed per call.
  }
 diff --git a/ggml/src/ggml-cuda/fattn-mma-f16.cuh b/ggml/src/ggml-cuda/fattn-mma-f16.cuh
-index b613ae61f..19ce544d6 100644
+index e185449d4..538d861f5 100644
 --- a/ggml/src/ggml-cuda/fattn-mma-f16.cuh
 +++ b/ggml/src/ggml-cuda/fattn-mma-f16.cuh
-@@ -491,7 +491,21 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
+@@ -495,7 +495,21 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
          float        * const __restrict__ KQ_rowsum,
          const int jt,
          const int kb0,
@@ -3859,7 +3849,7 @@ index b613ae61f..19ce544d6 100644
  #if defined(VOLTA_MMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || (defined(AMD_WMMA_AVAILABLE) && defined(RDNA4)) || defined(AMD_MFMA_AVAILABLE)
      constexpr int  warp_size       = ggml_cuda_get_physical_warp_size();
      constexpr int  ncols           = ncols1 * ncols2;
-@@ -608,6 +622,79 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
+@@ -612,6 +626,79 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
          }
      }
  
@@ -3939,7 +3929,7 @@ index b613ae61f..19ce544d6 100644
      if (use_logit_softcap) {
          constexpr int stride = cols_per_warp == 8 ? np*T_C_KQ::I : np*T_C_KQ::J;
          static_assert(nbatch_fa % stride == 0, "bad loop size");
-@@ -960,7 +1047,8 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
+@@ -937,7 +1024,8 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
          scale, slope, logit_softcap, ne01, ne02,
          stride_K, stride_V, stride_mask,
          tile_Q, tile_K, tile_V, tile_mask,
@@ -3949,7 +3939,7 @@ index b613ae61f..19ce544d6 100644
      NO_DEVICE_CODE;
  #endif // defined(VOLTA_MMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || (defined(AMD_WMMA_AVAILABLE) && defined(RDNA4)) || defined(AMD_MFMA_AVAILABLE)
  }
-@@ -1026,7 +1114,16 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
+@@ -1003,7 +1091,16 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
          const int jt,
          const int zt_gqa,
          const int kb0_start,
@@ -3967,7 +3957,7 @@ index b613ae61f..19ce544d6 100644
  #if defined(VOLTA_MMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || (defined(AMD_WMMA_AVAILABLE) && defined(RDNA4)) || defined(AMD_MFMA_AVAILABLE)
      //In this kernel Q, K, V are matrices while i, j, k are matrix indices.
  
-@@ -1063,7 +1160,8 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
+@@ -1040,7 +1137,8 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
      constexpr int stride_tile_KV_max = stride_tile_K > stride_tile_V ? stride_tile_K : stride_tile_V;
  
      extern __shared__ half2 tile_Q[];
@@ -3977,7 +3967,7 @@ index b613ae61f..19ce544d6 100644
      half2 * tile_V    =           nstages > 1 ? tile_K + nbatch_fa * stride_tile_K : tile_K;
      half  * tile_mask = (half *) (nstages > 1 ? tile_V + nbatch_fa * stride_tile_V : tile_V + nbatch_fa * stride_tile_KV_max);
  
-@@ -1167,7 +1265,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
+@@ -1144,7 +1242,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
                   T_A_KQ, T_B_KQ, T_C_KQ, T_A_VKQ, T_B_VKQ, T_C_VKQ>
                  (Q_f2, K_h2, V_h2, mask_h, dstk, dstk_fixup, scale, slope, logit_softcap,
                   ne01, ne02, stride_K, stride_V, stride_mask, tile_Q, tile_K, tile_V, tile_mask, Q_B, VKQ_C,
@@ -3986,7 +3976,7 @@ index b613ae61f..19ce544d6 100644
          }
          constexpr bool last_iter = true;
          const     int  k_VKQ_sup = ne11 - kb0*nbatch_fa;
-@@ -1176,7 +1274,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
+@@ -1153,7 +1251,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
                T_A_KQ, T_B_KQ, T_C_KQ, T_A_VKQ, T_B_VKQ, T_C_VKQ>
              (Q_f2, K_h2, V_h2, mask_h, dstk, dstk_fixup, scale, slope, logit_softcap,
               ne01, ne02, stride_K, stride_V, stride_mask, tile_Q, tile_K, tile_V, tile_mask, Q_B, VKQ_C,
@@ -3995,7 +3985,7 @@ index b613ae61f..19ce544d6 100644
      } else {
          constexpr bool oob_check = false;
          for (; kb0 < kb0_stop-1; ++kb0) {
-@@ -1187,7 +1285,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
+@@ -1164,7 +1262,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
                   T_A_KQ, T_B_KQ, T_C_KQ, T_A_VKQ, T_B_VKQ, T_C_VKQ>
                  (Q_f2, K_h2, V_h2, mask_h, dstk, dstk_fixup, scale, slope, logit_softcap,
                   ne01, ne02, stride_K, stride_V, stride_mask, tile_Q, tile_K, tile_V, tile_mask, Q_B, VKQ_C,
@@ -4004,7 +3994,7 @@ index b613ae61f..19ce544d6 100644
          }
          constexpr bool last_iter = true;
          constexpr int  k_VKQ_sup = nbatch_fa;
-@@ -1196,7 +1294,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
+@@ -1173,7 +1271,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
               T_A_KQ, T_B_KQ, T_C_KQ, T_A_VKQ, T_B_VKQ, T_C_VKQ>
              (Q_f2, K_h2, V_h2, mask_h, dstk, dstk_fixup, scale, slope, logit_softcap,
               ne01, ne02, stride_K, stride_V, stride_mask, tile_Q, tile_K, tile_V, tile_mask, Q_B, VKQ_C,
@@ -4013,7 +4003,7 @@ index b613ae61f..19ce544d6 100644
      }
  
      // With multi-stage loading there is no __syncthreads at the end of the iter,
-@@ -1537,9 +1635,10 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
+@@ -1514,9 +1612,10 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
      }
  #else
      GGML_UNUSED_VARS(Q_f2, K_h2, V_h2, mask_h, sinks_f, dstk, dstk_fixup,
@@ -4026,7 +4016,7 @@ index b613ae61f..19ce544d6 100644
      NO_DEVICE_CODE;
  #endif // defined(VOLTA_MMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || (defined(AMD_WMMA_AVAILABLE) && defined(RDNA4)) || defined(AMD_MFMA_AVAILABLE)
  }
-@@ -1567,7 +1666,9 @@ static __global__ void flash_attn_ext_f16(
+@@ -1544,7 +1643,9 @@ static __global__ void flash_attn_ext_f16(
                              const int32_t nb11, const int32_t nb12, const int64_t nb13,
                              const int32_t nb21, const int32_t nb22, const int64_t nb23,
                              const int32_t ne31, const int32_t ne32, const int32_t ne33,
@@ -4037,7 +4027,7 @@ index b613ae61f..19ce544d6 100644
  #if defined(FLASH_ATTN_AVAILABLE) && (defined(VOLTA_MMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || (defined(AMD_WMMA_AVAILABLE) && defined(RDNA4)) || defined(AMD_MFMA_AVAILABLE))
  
      // Skip unused kernel variants for faster compilation:
-@@ -1650,6 +1751,9 @@ static __global__ void flash_attn_ext_f16(
+@@ -1627,6 +1728,9 @@ static __global__ void flash_attn_ext_f16(
          float2       * dstk   = ((float2 *) dst) + (sequence*ne01.z*ne02 + zt_Q) * (DV/2);
  
          const half2 * V_h2 = V_is_K_view ? K_h2 : (const half2 *) (V + nb23*sequence + nb22*z_KV);
@@ -4047,7 +4037,7 @@ index b613ae61f..19ce544d6 100644
          const float * sinks_f = sinks ? (const float *) sinks + zt_Q : nullptr;
  
          const float slope = ncols2 == 1 ? get_alibi_slope(max_bias, zt_Q, n_head_log2, m0, m1) : 1.0f;
-@@ -1662,12 +1766,14 @@ static __global__ void flash_attn_ext_f16(
+@@ -1639,12 +1743,14 @@ static __global__ void flash_attn_ext_f16(
              constexpr bool needs_fixup = false; // CUDA block is working on an entire tile.
              flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, needs_fixup, is_fixup>
                  (Q_f2, K_h2, V_h2, mask_h, sinks_f, dstk, dst_meta, scale, slope, logit_softcap,
@@ -4064,7 +4054,7 @@ index b613ae61f..19ce544d6 100644
          }
  
          kbc += iter_k;
-@@ -1696,6 +1802,7 @@ static __global__ void flash_attn_ext_f16(
+@@ -1673,6 +1779,7 @@ static __global__ void flash_attn_ext_f16(
      float2       * dstk   = ((float2 *) dst) + (sequence*ne01.z*ne02 + zt_Q) * (DV/2);
  
      const half2 * V_h2 = V_is_K_view ? K_h2 : (const half2 *) (V + nb23*sequence + nb22*z_KV);
@@ -4072,7 +4062,7 @@ index b613ae61f..19ce544d6 100644
      const float * sinks_f = sinks ? (const float *) sinks + zt_Q : nullptr;
  
      const float slope = ncols2 == 1 ? get_alibi_slope(max_bias, zt_Q, n_head_log2, m0, m1) : 1.0f;
-@@ -1708,7 +1815,8 @@ static __global__ void flash_attn_ext_f16(
+@@ -1685,7 +1792,8 @@ static __global__ void flash_attn_ext_f16(
      constexpr bool needs_fixup = false;
      flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, needs_fixup, is_fixup>
          (Q_f2, K_h2, V_h2, mask_h, sinks_f, dstk, dst_meta, scale, slope, logit_softcap,
@@ -4082,7 +4072,7 @@ index b613ae61f..19ce544d6 100644
  #else
      GGML_UNUSED_VARS(Q, K, V, mask, sinks, KV_max, dst, dst_meta, scale,
          max_bias, m0, m1, n_head_log2, logit_softcap,
-@@ -1718,7 +1826,7 @@ static __global__ void flash_attn_ext_f16(
+@@ -1695,7 +1803,7 @@ static __global__ void flash_attn_ext_f16(
                nb11, nb12, nb13,
                nb21, nb22, nb23,
                ne31, ne32, ne33,
@@ -4091,7 +4081,7 @@ index b613ae61f..19ce544d6 100644
      NO_DEVICE_CODE;
  #endif // defined(FLASH_ATTN_AVAILABLE) && (defined(VOLTA_MMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || (defined(AMD_WMMA_AVAILABLE) && defined(RDNA4)) || defined(AMD_MFMA_AVAILABLE))
  }
-@@ -1743,7 +1851,10 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
+@@ -1720,7 +1828,10 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
      const int warp_size_host = ggml_cuda_info().devices[ctx.device].warp_size;
      const int nwarps         = nthreads / warp_size_host;
  
@@ -4103,7 +4093,7 @@ index b613ae61f..19ce544d6 100644
  
      const size_t nbytes_shared_KV_1stage = nbatch_fa            * std::max(nbatch_K2 + 4,  nbatch_V2 + 4) * sizeof(half2);
      const size_t nbytes_shared_KV_2stage = nbatch_fa            *         (nbatch_K2 + 4 + nbatch_V2 + 4) * sizeof(half2);
-@@ -1753,6 +1864,7 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
+@@ -1730,6 +1841,7 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
  
      const size_t nbytes_shared_KV = nstages <= 1 ? nbytes_shared_KV_1stage : nbytes_shared_KV_2stage;
  
@@ -4111,7 +4101,7 @@ index b613ae61f..19ce544d6 100644
      const size_t nbytes_shared_total = std::max(nbytes_shared_combine, Q_in_reg ?
          std::max(nbytes_shared_Q,  nbytes_shared_KV + nbytes_shared_mask) :
                   nbytes_shared_Q + nbytes_shared_KV + nbytes_shared_mask);
-@@ -1768,25 +1880,26 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
+@@ -1745,25 +1857,26 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
      fattn_kernel_t fattn_kernel;
      if (logit_softcap == 0.0f) {
          constexpr bool use_logit_softcap = false;
@@ -5605,10 +5595,10 @@ index f19defbff..1fc7b843c 100644
  #endif // defined(FLASH_ATTN_AVAILABLE) && (defined(GGML_HIP_ROCWMMA_FATTN) && defined(GGML_USE_WMMA_FATTN))
  }
 diff --git a/ggml/src/ggml-cuda/fattn.cu b/ggml/src/ggml-cuda/fattn.cu
-index addf93205..1c3d4168c 100644
+index ea6607cd3..fe6c0b574 100644
 --- a/ggml/src/ggml-cuda/fattn.cu
 +++ b/ggml/src/ggml-cuda/fattn.cu
-@@ -216,13 +216,36 @@ static void ggml_cuda_flash_attn_ext_mma_f16(ggml_backend_cuda_context & ctx, gg
+@@ -224,13 +224,36 @@ static void ggml_cuda_flash_attn_ext_mma_f16(ggml_backend_cuda_context & ctx, gg
      FATTN_VEC_CASE(128, type_K, type_V)       \
      FATTN_VEC_CASE(256, type_K, type_V)       \
  
@@ -5646,7 +5636,7 @@ index addf93205..1c3d4168c 100644
      FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q4_0, GGML_TYPE_F16)
      FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q4_1, GGML_TYPE_F16)
      FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q5_0, GGML_TYPE_F16)
-@@ -277,11 +300,319 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
+@@ -285,11 +308,319 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
      FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q5_1, GGML_TYPE_BF16)
      FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q8_0, GGML_TYPE_BF16)
      FATTN_VEC_CASES_ALL_D(GGML_TYPE_BF16, GGML_TYPE_BF16)
@@ -5966,7 +5956,7 @@ index addf93205..1c3d4168c 100644
  #endif // GGML_CUDA_FA_ALL_QUANTS
  
      GGML_ABORT("fatal error");
-@@ -348,7 +679,10 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
+@@ -356,7 +687,10 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
              if (V->ne[0] != K->ne[0]) {
                  return BEST_FATTN_KERNEL_NONE;
              }
@@ -5978,7 +5968,7 @@ index addf93205..1c3d4168c 100644
                  return BEST_FATTN_KERNEL_NONE;
              }
              break;
-@@ -366,7 +700,29 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
+@@ -374,7 +708,29 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
  
  #ifndef GGML_CUDA_FA_ALL_QUANTS
      if (K->type != V->type) {
@@ -6009,7 +5999,7 @@ index addf93205..1c3d4168c 100644
      }
  #endif // GGML_CUDA_FA_ALL_QUANTS
  
-@@ -383,6 +739,26 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
+@@ -391,6 +747,26 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
          case GGML_TYPE_Q4_0:
          case GGML_TYPE_Q8_0:
          case GGML_TYPE_BF16:
@@ -6036,7 +6026,7 @@ index addf93205..1c3d4168c 100644
              break;
          default:
              return BEST_FATTN_KERNEL_NONE;
-@@ -392,6 +768,38 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
+@@ -400,6 +776,38 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
          return BEST_FATTN_KERNEL_NONE;
      }
  
@@ -6076,10 +6066,10 @@ index addf93205..1c3d4168c 100644
      const bool can_use_vector_kernel = Q->ne[0] <= 256 && Q->ne[0] % 64 == 0 && K->ne[1] % FATTN_KQ_STRIDE == 0;
  
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 648124c0d..c2271b793 100644
+index 185956317..e826852c8 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
-@@ -743,7 +743,9 @@ static size_t ggml_backend_cuda_buffer_type_get_alloc_size(ggml_backend_buffer_t
+@@ -800,7 +800,9 @@ static size_t ggml_backend_cuda_buffer_type_get_alloc_size(ggml_backend_buffer_t
  
      if (ggml_is_quantized(tensor->type)) {
          if (ne0 % MATRIX_ROW_PADDING != 0) {
@@ -6090,7 +6080,7 @@ index 648124c0d..c2271b793 100644
              size += ggml_row_size(tensor->type, MATRIX_ROW_PADDING - ne0 % MATRIX_ROW_PADDING);
          }
      }
-@@ -4748,7 +4750,17 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+@@ -4927,7 +4929,17 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
              {
                  return (op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_F16 || op->type == GGML_TYPE_BF16 ||
                         op->type == GGML_TYPE_Q4_0 || op->type == GGML_TYPE_Q4_1 || op->type == GGML_TYPE_Q5_0 ||
@@ -8300,10 +8290,10 @@ index 000000000..997b5ead0
 +
 +DECL_FATTN_VEC_CASE(576, GGML_TYPE_TBQP4_4, GGML_TYPE_TBQ4_4);
 diff --git a/ggml/src/ggml-hip/CMakeLists.txt b/ggml/src/ggml-hip/CMakeLists.txt
-index 291b48374..5d2224bfa 100644
+index a7d4e0ea2..3277d737b 100644
 --- a/ggml/src/ggml-hip/CMakeLists.txt
 +++ b/ggml/src/ggml-hip/CMakeLists.txt
-@@ -75,7 +75,117 @@ else()
+@@ -79,7 +79,117 @@ else()
          ../ggml-cuda/template-instances/fattn-vec-instance-f16-f16.cu
          ../ggml-cuda/template-instances/fattn-vec-instance-q4_0-q4_0.cu
          ../ggml-cuda/template-instances/fattn-vec-instance-q8_0-q8_0.cu
@@ -8525,10 +8515,10 @@ index d56c86da8..7dc3d24da 100644
  GGML_API void dequantize_row_iq2_xs (const block_iq2_xs  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
  GGML_API void dequantize_row_iq2_s  (const block_iq2_s   * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
-index 0142498d9..8b77aee07 100644
+index eda041f45..cbc53dc95 100644
 --- a/ggml/src/ggml.c
 +++ b/ggml/src/ggml.c
-@@ -912,6 +912,128 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
+@@ -922,6 +922,128 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
          .type_size                = 0,
          .is_quantized             = false,
      },
@@ -8658,14 +8648,13 @@ index 0142498d9..8b77aee07 100644
  
  const struct ggml_type_traits * ggml_get_type_traits(enum ggml_type type) {
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index cf29bad8e..231adc686 100644
+index 8126249e1..74e54da88 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -2942,7 +2942,51 @@ llama_context * llama_init_from_model(
+@@ -2946,6 +2946,50 @@ llama_context * llama_init_from_model(
          params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
      }
  
--    if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED && ggml_is_quantized(params.type_k)) {
 +    // TurboQuant head_dim auto-detection: map _0 types (blck_size=256) to _1 types (blck_size=128)
 +    {
 +        auto tbq_map = [&](ggml_type & t, uint32_t head_dim) {
@@ -8710,15 +8699,14 @@ index cf29bad8e..231adc686 100644
 +        tbq_map(params.type_v, model->hparams.n_embd_head_v());
 +    }
 +
-+    if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO && ggml_is_quantized(params.type_k)) {
-         const uint32_t blck_size = ggml_blck_size(params.type_k);
-         for (uint32_t il = 0; il < model->hparams.n_layer; ++il) {
-             if (model->hparams.n_embd_head_k(il) % blck_size != 0) {
+     if (model->split_mode() == LLAMA_SPLIT_MODE_TENSOR) {
+         if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO) {
+             LLAMA_LOG_INFO("%s: enabling flash_attn since it is required for SPLIT_MODE_TENSOR\n", __func__);
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index d6f5c5eab..ec5d1b5c1 100644
+index 2ff23f87c..e3ee78ec5 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
-@@ -2263,7 +2263,7 @@ ggml_tensor * llm_graph_context::build_attn(
+@@ -2360,7 +2360,7 @@ ggml_tensor * llm_graph_context::build_attn(
      if (v_rot) {
          if (v_cur) {
              v_cur = ggml_mul_mat_aux(ctx0, v_cur, v_rot);
