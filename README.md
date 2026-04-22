@@ -58,20 +58,41 @@
 
 ### 2. 运行示例
 
-#### A. 运行 Gemma-4-31B (单卡 3090 运行 96K 上下文)
+本补丁引入了两大核心技术：**TurboQuant (KV 压缩)** 与 **DFlash (投机加速)**。
+
+#### 🚀 核心参数深度解析
+
+| 参数 | 建议值 | 说明与优势 |
+| :--- | :--- | :--- |
+| **`-ctk`** | `tbqp3` / `tbqp4` | **TurboQuant Key 缓存量化**。`tbqp` 包含 QJL 优化，3-bit 可节省约 75% KV 显存，是实现 100K+ 上下文的核心。 |
+| **`-ctv`** | `tbq3` / `tbq4` | **TurboQuant Value 缓存量化**。配合 `-ctk` 使用，大幅降低长文本下的显存压力。 |
+| **`--dflash`** | (开关) | **启用 DFlash 投机引擎**。利用专用的 Draft 模型预测 Token，在不损失精度的前提下显著提升推理 TPS。 |
+| **`-md`** | `draft.gguf` | **指定 Draft 模型**。需配合 `--dflash` 使用，通常使用 0.1B~1B 规模的专用加速模型。 |
+
+---
+
+#### 💡 完整运行示例 (Full Examples)
+
+##### A. 极限上下文模式：Gemma-4-31B (单卡 3090 运行 128K 上下文)
+此配置利用 **TurboQuant 3-bit** 压缩，将原本需要 60G+ 显存的 128K KV Cache 压缩至约 15G，从而在 24G 显卡上全量运行。
+
 ```bash
 ./build/bin/llama-server \
-    -m /path/to/gemma-4-31B-it-UD-IQ3_XXS.gguf \
-    -c 98304 -b 1024 -ub 512 -ngl 99 -fa \
-    -ctk tbqp3_0 -ctv tbq3_0 \
+    -m models/gemma-4-31b-it-UD-IQ3_XXS.gguf \
+    -c 131072 -b 1024 -ub 512 -ngl 99 -fa \
+    -ctk tbqp3 -ctv tbq3 \
     --port 1337
 ```
 
-#### B. 运行 Qwopus-27B Heretic (超长上下文支持)
+##### B. 极速推理模式：Qwopus-27B + DFlash 投机加速
+此配置同时开启了 **4-bit KV 压缩**（兼顾精度与显存）与 **DFlash 投机采样**，推理速度通常可提升 1.5x - 2x。
+
 ```bash
 ./build/bin/llama-server \
-    -m /path/to/Qwopus-GLM-Heretic-27B-dare-ties.gguf \
-    -c 131072 -b 1024 -ub 512 -ngl 99 -fa \
-    -ctk tbqp3_0 -ctv tbq3_0 \
+    -m models/Qwopus-GLM-Heretic-27B-dare-ties.gguf \
+    -md models/qwopus-27b-dflash-draft.gguf \
+    --dflash \
+    -c 98304 -b 1024 -ub 512 -ngl 99 -fa \
+    -ctk tbqp4 -ctv tbq4 \
     --port 1337
 ```

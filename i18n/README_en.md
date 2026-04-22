@@ -57,20 +57,41 @@ To ensure the patch is applied perfectly, **please strictly lock your repository
 
 ### 2. Run Examples
 
-#### A. Running Gemma-4-31B (96K Context on Single 3090)
+This patch introduces two core technologies: **TurboQuant (KV Compression)** and **DFlash (Speculative Acceleration)**.
+
+#### 🚀 Core Parameters Explained
+
+| Parameter | Recommended | Description & Advantages |
+| :--- | :--- | :--- |
+| **`-ctk`** | `tbqp3` / `tbqp4` | **TurboQuant Key Cache Quantization**. `tbqp` includes QJL optimization. 3-bit saves ~75% KV VRAM, essential for 100K+ context lengths. |
+| **`-ctv`** | `tbq3` / `tbq4` | **TurboQuant Value Cache Quantization**. Used with `-ctk` to drastically reduce VRAM pressure during long-context inference. |
+| **`--dflash`** | (Toggle) | **Enable DFlash Speculative Engine**. Predicts tokens using a dedicated Draft model, significantly boosting TPS without losing accuracy. |
+| **`-md`** | `draft.gguf` | **Specify Draft Model**. Required for `--dflash`. Usually a specialized 0.1B~1B parameter model for speed. |
+
+---
+
+#### 💡 Full Usage Examples
+
+##### A. Extreme Context Mode: Gemma-4-31B (128K Context on Single 3090)
+This configuration uses **TurboQuant 3-bit** compression to squeeze 128K KV Cache (originally 60GB+) into ~15GB, enabling full offload on a 24GB card.
+
 ```bash
 ./build/bin/llama-server \
-    -m /path/to/gemma-4-31B-it-UD-IQ3_XXS.gguf \
-    -c 98304 -b 1024 -ub 512 -ngl 99 -fa \
-    -ctk tbqp3_0 -ctv tbq3_0 \
+    -m models/gemma-4-31b-it-UD-IQ3_XXS.gguf \
+    -c 131072 -b 1024 -ub 512 -ngl 99 -fa \
+    -ctk tbqp3 -ctv tbq3 \
     --port 1337
 ```
 
-#### B. Running Qwopus-27B Heretic (Ultra-Long Context)
+##### B. High-Speed Inference: Qwopus-27B + DFlash Acceleration
+This configuration combines **4-bit KV compression** (balancing accuracy and VRAM) with **DFlash speculative sampling**, typically yielding 1.5x - 2x speedup.
+
 ```bash
 ./build/bin/llama-server \
-    -m /path/to/Qwopus-GLM-Heretic-27B-dare-ties.gguf \
-    -c 131072 -b 1024 -ub 512 -ngl 99 -fa \
-    -ctk tbqp3_0 -ctv tbq3_0 \
+    -m models/Qwopus-GLM-Heretic-27B-dare-ties.gguf \
+    -md models/qwopus-27b-dflash-draft.gguf \
+    --dflash \
+    -c 98304 -b 1024 -ub 512 -ngl 99 -fa \
+    -ctk tbqp4 -ctv tbq4 \
     --port 1337
 ```
