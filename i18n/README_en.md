@@ -19,23 +19,15 @@ In the era of local LLMs, **Gemma 4** and **Qwopus** represent a breakthrough wh
 
 ---
 
-## 📊 Supported & Tested Models
-
-This patch is heavily optimized and tested for:
-- **Gemma 4 Series**: Fully supports SWA/ISWA hybrid cache alignment. 
-  - *Tested: Gemma-4-31B-It-UD-IQ3_XXS.gguf*
-- **Qwopus Variants**: Optimized for Qwen2-based architectures.
-  - *Tested: Qwopus-GLM-Heretic-27B-dare-ties.gguf*
-  - *Tested: Qwopus3.5-27B-v3*
-- **Extreme VRAM Savings**: 
-  - **Gemma-4-31B** + **96K Context** = **~23.6 GB VRAM** (Single 3090/4090).
-  - KV Cache reduction: **75% Compression Ratio**.
-
----
-
 ## 🛠️ Build & Injection Guide
 
-To ensure the patch is applied perfectly, **please strictly lock your repository to the tested specific commit version**.
+This project provides three different patches. Please choose according to your needs:
+
+| Patch File | Features Included | Use Case |
+| :--- | :--- | :--- |
+| **`llama_turboquant.patch`** | TurboQuant Only | Only need KV cache compression (VRAM optimization), no speculative sampling. |
+| **`llama_dflash.patch`** | DFlash Only | Only need speculative acceleration, no KV cache compression. |
+| **`llama_tq_df.patch`** | **TQ + DFlash (Rec.)** | Enable both KV compression and speculative acceleration for maximum performance. |
 
 ### 1. Prepare Repository & Lock Version
 1. Clone the official llama.cpp repository:
@@ -47,20 +39,42 @@ To ensure the patch is applied perfectly, **please strictly lock your repository
    ```bash
    git checkout 82d3f4d3
    ```
-3. Copy the `llama_turboquant.patch` file from this project into the `llama.cpp` root directory.
 
-4. Apply the patch and build:
-   ```bash
-   git apply llama_turboquant.patch
-   cmake -B build -DGGML_CUDA=ON -DGGML_CUDA_F16=ON
-   cmake --build build --config Release -j $(nproc) --target llama-server
-   ```
+### 2. Apply Patch (Choose one of three)
 
-### 2. Run Examples
+*   **Option A (Recommended)**: Apply full feature patch
+    ```bash
+    git apply /path/to/llama_tq_df.patch
+    ```
+*   **Option B**: Apply TurboQuant only
+    ```bash
+    git apply /path/to/llama_turboquant.patch
+    ```
+*   **Option C**: Apply DFlash only
+    ```bash
+    git apply /path/to/llama_dflash.patch
+    ```
 
-This patch introduces two core technologies: **TurboQuant (KV Compression)** and **DFlash (Speculative Acceleration)**.
+### 3. Build
+```bash
+cmake -B build -DGGML_CUDA=ON -DGGML_CUDA_F16=ON
+cmake --build build --config Release -j $(nproc) --target llama-server
+```
 
-#### 🚀 Core Parameters Explained
+---
+
+## 📊 Supported & Tested Models
+
+This patch is heavily optimized and tested for:
+- **Gemma 4 Series**: Fully supports SWA/ISWA hybrid cache alignment. 
+  - *Tested: Gemma-4-31B-It-UD-IQ3_XXS.gguf*
+- **Qwopus Variants**: Optimized for Qwen2-based architectures.
+  - *Tested: Qwopus-GLM-Heretic-27B-dare-ties.gguf*
+  - *Tested: Qwopus3.5-27B-v3*
+
+---
+
+## 🚀 Core Parameters Explained
 
 | Parameter | Recommended | Description & Advantages |
 | :--- | :--- | :--- |

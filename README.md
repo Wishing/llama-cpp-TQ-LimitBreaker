@@ -19,24 +19,15 @@
 
 ---
 
-## 📊 已测试并支持的模型
-
-本补丁针对以下架构进行了深度优化和测试：
-- **Gemma 4 全系列**：完整支持其复杂的 SWA/ISWA 混合缓存对齐。
-  - *测试模型：Gemma-4-31B-It-UD-IQ3_XXS.gguf*
-- **Qwopus 系列**：针对 Qwen 架构深度优化，包括：
-  - `Qwopus-GLM-Heretic-27B-dare-ties`
-  - `Qwopus3.5-27B-v3`
-  - 所有基于 Qwen2 的 27B+ 衍生模型。
-- **极致显存节省**：
-  - **Gemma-4-31B** + **96K 上下文** = **~23.6 GB 显存占用** (单张 3090/4090)。
-  - KV Cache 压缩率高达 **75%**。
-
----
-
 ## 🛠️ 构建与注入指南 (Build Instructions)
 
-为了保证补丁能 100% 完美打入，**请务必严格锁定到经过极限测试的特定 Commit 版本**。
+本项目提供三个不同的补丁，请根据您的需求选择：
+
+| 补丁文件 | 包含功能 | 适用场景 |
+| :--- | :--- | :--- |
+| **`llama_turboquant.patch`** | 仅 TurboQuant | 只需要 KV 缓存压缩（显存优化），不需要投机采样。 |
+| **`llama_dflash.patch`** | 仅 DFlash | 只需要投机采样加速，不需要 KV 缓存压缩。 |
+| **`llama_tq_df.patch`** | **TQ + DFlash (推荐)** | 同时启用 KV 压缩与投机加速，实现显存与速度的双重极限。 |
 
 ### 1. 准备代码库与锁定版本
 1. 克隆官方 llama.cpp 代码库：
@@ -48,20 +39,43 @@
    ```bash
    git checkout 82d3f4d3
    ```
-3. 将本项目中的 `llama_turboquant.patch` 文件复制到 `llama.cpp` 的根目录下。
 
-4. 应用补丁并编译：
-   ```bash
-   git apply llama_turboquant.patch
-   cmake -B build -DGGML_CUDA=ON -DGGML_CUDA_F16=ON
-   cmake --build build --config Release -j $(nproc) --target llama-server
-   ```
+### 2. 应用补丁 (根据需求三选一)
 
-### 2. 运行示例
+*   **方案 A (全能推荐)**：应用全功能补丁
+    ```bash
+    git apply /path/to/llama_tq_df.patch
+    ```
+*   **方案 B**：仅应用 TurboQuant 补丁
+    ```bash
+    git apply /path/to/llama_turboquant.patch
+    ```
+*   **方案 C**：仅应用 DFlash 补丁
+    ```bash
+    git apply /path/to/llama_dflash.patch
+    ```
 
-本补丁引入了两大核心技术：**TurboQuant (KV 压缩)** 与 **DFlash (投机加速)**。
+### 3. 编译
+```bash
+cmake -B build -DGGML_CUDA=ON -DGGML_CUDA_F16=ON
+cmake --build build --config Release -j $(nproc) --target llama-server
+```
 
-#### 🚀 核心参数深度解析
+---
+
+## 📊 已测试并支持的模型
+
+本补丁针对以下架构进行了深度优化和测试：
+- **Gemma 4 全系列**：完整支持其复杂的 SWA/ISWA 混合缓存对齐。
+  - *测试模型：Gemma-4-31B-It-UD-IQ3_XXS.gguf*
+- **Qwopus 系列**：针对 Qwen 架构深度优化，包括：
+  - `Qwopus-GLM-Heretic-27B-dare-ties`
+  - `Qwopus3.5-27B-v3`
+  - 所有基于 Qwen2 的 27B+ 衍生模型。
+
+---
+
+## 🚀 核心参数深度解析
 
 | 参数 | 建议值 | 说明与优势 |
 | :--- | :--- | :--- |
