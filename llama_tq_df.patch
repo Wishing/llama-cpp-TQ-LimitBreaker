@@ -916,7 +916,7 @@ index 20e38bec4..4980c03da 100644
              }
              case COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE: {
 diff --git a/convert_hf_to_gguf.py b/convert_hf_to_gguf.py
-index 090686b15..902989599 100755
+index 090686b15..4fa6423ee 100755
 --- a/convert_hf_to_gguf.py
 +++ b/convert_hf_to_gguf.py
 @@ -97,6 +97,7 @@ class ModelBase:
@@ -958,7 +958,7 @@ index 090686b15..902989599 100755
      def write(self):
          self.prepare_tensors()
 -        self.prepare_metadata(vocab_only=False)
-+        self.prepare_metadata(vocab_only=False); self.gguf_writer.add_array("dflash.target_layer_ids", [0, 1, 2, 3, 4]); self.gguf_writer.add_array("target_layer_ids", [0, 1, 2, 3, 4])
++        self.prepare_metadata(vocab_only=False); self.gguf_writer.add_array("dflash.target_layer_ids", [0, 1, 2, 3, 4]); self.gguf_writer.add_array("target_layer_ids", [0, 1, 2, 3, 4]); self.gguf_writer.add_uint32("dflash.target_hidden_size", 5376)
          self.gguf_writer.write_header_to_file(path=self.fname_out)
          self.gguf_writer.write_kv_data_to_file()
          self.gguf_writer.write_tensors_to_file(progress=True)
@@ -9871,7 +9871,7 @@ index eb8698140..fc629fd5c 100644
      // Decoding
      //
 diff --git a/src/llama-arch.cpp b/src/llama-arch.cpp
-index 633a66fc6..4f1148d7a 100644
+index 633a66fc6..3938a93db 100644
 --- a/src/llama-arch.cpp
 +++ b/src/llama-arch.cpp
 @@ -127,6 +127,8 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
@@ -9883,7 +9883,7 @@ index 633a66fc6..4f1148d7a 100644
      { LLM_ARCH_PADDLEOCR,        "paddleocr"        },
      { LLM_ARCH_MIMO2,            "mimo2"            },
      { LLM_ARCH_STEP35,           "step35"           },
-@@ -284,6 +286,14 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
+@@ -284,6 +286,15 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
  
      { LLM_KV_CLASSIFIER_OUTPUT_LABELS, "%s.classifier.output_labels" },
  
@@ -9892,13 +9892,14 @@ index 633a66fc6..4f1148d7a 100644
 +    { LLM_KV_EAGLE3_NORM_BEFORE_RESIDUAL,  "%s.norm_before_residual"  },
 +
 +    { LLM_KV_DFLASH_TARGET_LAYER_IDS,     "%s.target_layer_ids"     },
++    { LLM_KV_DFLASH_TARGET_HIDDEN_SIZE,  "%s.target_hidden_size"   },
 +    { LLM_KV_DFLASH_BLOCK_SIZE,           "%s.block_size"           },
 +    { LLM_KV_DFLASH_MASK_TOKEN_ID,        "%s.mask_token_id"        },
 +
      { LLM_KV_SHORTCONV_L_CACHE, "%s.shortconv.l_cache" },
      // sentence-transformers dense modules feature dims
      { LLM_KV_DENSE_2_FEAT_IN,        "%s.dense_2_feat_in"  },
-@@ -547,6 +557,12 @@ static const std::map<llm_tensor, const char *> LLM_TENSOR_NAMES = {
+@@ -547,6 +558,12 @@ static const std::map<llm_tensor, const char *> LLM_TENSOR_NAMES = {
      { LLM_TENSOR_INDEXER_PROJ,                           "blk.%d.indexer.proj" },
      { LLM_TENSOR_INDEXER_ATTN_K,                         "blk.%d.indexer.attn_k" },
      { LLM_TENSOR_INDEXER_ATTN_Q_B,                       "blk.%d.indexer.attn_q_b" },
@@ -9911,7 +9912,7 @@ index 633a66fc6..4f1148d7a 100644
  };
  
  // declare information about the model weight tensors:
-@@ -767,6 +783,12 @@ static const std::map<llm_tensor, llm_tensor_info> LLM_TENSOR_INFOS = {
+@@ -767,6 +784,12 @@ static const std::map<llm_tensor, llm_tensor_info> LLM_TENSOR_INFOS = {
      // Nemotron 3 Super
      {LLM_TENSOR_FFN_LATENT_DOWN,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
      {LLM_TENSOR_FFN_LATENT_UP,              {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
@@ -9925,7 +9926,7 @@ index 633a66fc6..4f1148d7a 100644
  
  LLM_KV::LLM_KV(llm_arch arch, const char * suffix) : arch(arch), suffix(suffix) {}
 diff --git a/src/llama-arch.h b/src/llama-arch.h
-index 8f335f5c7..29f260eed 100644
+index 8f335f5c7..113835d77 100644
 --- a/src/llama-arch.h
 +++ b/src/llama-arch.h
 @@ -138,6 +138,8 @@ enum llm_arch {
@@ -9937,7 +9938,7 @@ index 8f335f5c7..29f260eed 100644
  };
  
  enum llm_kv {
-@@ -326,6 +328,14 @@ enum llm_kv {
+@@ -326,6 +328,15 @@ enum llm_kv {
  
      LLM_KV_CLASSIFIER_OUTPUT_LABELS,
  
@@ -9946,13 +9947,14 @@ index 8f335f5c7..29f260eed 100644
 +    LLM_KV_EAGLE3_NORM_BEFORE_RESIDUAL,
 +
 +    LLM_KV_DFLASH_TARGET_LAYER_IDS,
++    LLM_KV_DFLASH_TARGET_HIDDEN_SIZE,
 +    LLM_KV_DFLASH_BLOCK_SIZE,
 +    LLM_KV_DFLASH_MASK_TOKEN_ID,
 +
      LLM_KV_SHORTCONV_L_CACHE,
  
      LLM_KV_XIELU_ALPHA_N,
-@@ -554,6 +564,11 @@ enum llm_tensor {
+@@ -554,6 +565,11 @@ enum llm_tensor {
      LLM_TENSOR_NEXTN_HNORM,
      LLM_TENSOR_NEXTN_SHARED_HEAD_HEAD,
      LLM_TENSOR_NEXTN_SHARED_HEAD_NORM,
@@ -10692,10 +10694,10 @@ index 5cb1756c6..1925a275d 100644
      std::map<llama_seq_id, llama_sampler *> samplers;
  
 diff --git a/src/llama-hparams.h b/src/llama-hparams.h
-index ac7f9ee86..2583cf871 100644
+index ac7f9ee86..5439c0312 100644
 --- a/src/llama-hparams.h
 +++ b/src/llama-hparams.h
-@@ -213,6 +213,21 @@ struct llama_hparams {
+@@ -213,6 +213,22 @@ struct llama_hparams {
      // gemma4 per-layer embedding
      uint32_t n_embd_per_layer = 0;
  
@@ -10711,6 +10713,7 @@ index ac7f9ee86..2583cf871 100644
 +
 +    // DFlash draft model
 +    std::array<int, 5> dflash_target_layer_ids = {};
++    uint32_t dflash_target_hidden_size = 0;
 +    uint32_t dflash_block_size     = 16;
 +    uint32_t dflash_mask_token_id  = 0;
 +
@@ -10909,10 +10912,10 @@ index 4e65a45a5..832fc990c 100644
      template bool llama_model_loader::get_key_or_arr<std::array<float, 512>>(enum llm_kv kid, std::array<float, 512> & result, uint32_t n, bool required);
  
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 9e2a13cbd..a2fbca2bb 100644
+index 9e2a13cbd..c805f83db 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
-@@ -2758,6 +2758,57 @@ void llama_model::load_hparams(llama_model_loader & ml) {
+@@ -2758,6 +2758,62 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                      default: type = LLM_TYPE_UNKNOWN;
                  }
              } break;
@@ -10951,16 +10954,21 @@ index 9e2a13cbd..a2fbca2bb 100644
 +
 +                ml.get_key(LLM_KV_DFLASH_BLOCK_SIZE, hparams.dflash_block_size, false);
 +                ml.get_key(LLM_KV_DFLASH_MASK_TOKEN_ID, hparams.dflash_mask_token_id, false);
++                ml.get_key(LLM_KV_DFLASH_TARGET_HIDDEN_SIZE, hparams.dflash_target_hidden_size, false);
++                if (hparams.dflash_target_hidden_size == 0) {
++                    hparams.dflash_target_hidden_size = hparams.n_embd;
++                }
 +
 +                if (!ml.get_key_or_arr(LLM_KV_DFLASH_TARGET_LAYER_IDS, hparams.dflash_target_layer_ids, 5, false)) {
 +                    throw std::runtime_error("DFlash model requires 'target_layer_ids' in GGUF metadata");
 +                }
-+                LLAMA_LOG_INFO("%s: DFlash extract_layers = [%d, %d, %d, %d, %d]\n", __func__,
++                LLAMA_LOG_INFO("%s: DFlash extract_layers = [%d, %d, %d, %d, %d], target_hidden_size = %u\n", __func__,
 +                               hparams.dflash_target_layer_ids[0],
 +                               hparams.dflash_target_layer_ids[1],
 +                               hparams.dflash_target_layer_ids[2],
 +                               hparams.dflash_target_layer_ids[3],
-+                               hparams.dflash_target_layer_ids[4]);
++                               hparams.dflash_target_layer_ids[4],
++                               hparams.dflash_target_hidden_size);
 +
 +                LLAMA_LOG_INFO("%s: DFlash block_size = %u, mask_token_id = %u\n",
 +                               __func__, hparams.dflash_block_size, hparams.dflash_mask_token_id);
@@ -10970,7 +10978,7 @@ index 9e2a13cbd..a2fbca2bb 100644
          case LLM_ARCH_COGVLM:
              {
                  ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
-@@ -7254,6 +7305,97 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
+@@ -7254,6 +7310,97 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                          layer.ffn_exp_probs_b = create_tensor(tn(LLM_TENSOR_FFN_EXP_PROBS_B, "bias", i), {n_expert}, 0);
                      }
                  } break;
@@ -11035,7 +11043,7 @@ index 9e2a13cbd..a2fbca2bb 100644
 +            case LLM_ARCH_DFLASH:
 +                {
 +                    const int64_t n_target_layer_ids = (int64_t)hparams.dflash_target_layer_ids.size();
-+                    const int64_t n_embd_target_features = n_target_layer_ids * n_embd;
++                    const int64_t n_embd_target_features = n_target_layer_ids * hparams.dflash_target_hidden_size;
 +
 +                    fc = create_tensor(tn(LLM_TENSOR_DFLASH_FC, "weight"), {n_embd_target_features, n_embd}, 0);
 +                    dflash_hidden_norm = create_tensor(tn(LLM_TENSOR_DFLASH_HIDDEN_NORM, "weight"), {n_embd}, 0);
@@ -11068,7 +11076,7 @@ index 9e2a13cbd..a2fbca2bb 100644
              case LLM_ARCH_KIMI_LINEAR:
                  {
                      tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
-@@ -8441,6 +8583,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params,
+@@ -8441,6 +8588,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params,
          case LLM_ARCH_LLADA:
          case LLM_ARCH_LLADA_MOE:
          case LLM_ARCH_RND1:
@@ -11076,7 +11084,7 @@ index 9e2a13cbd..a2fbca2bb 100644
              {
                  res = nullptr;
              } break;
-@@ -9031,6 +9174,22 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
+@@ -9031,6 +9179,22 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
              {
                  llm = std::make_unique<llm_build_minimax_m2>(*this, params);
              } break;
@@ -11099,7 +11107,7 @@ index 9e2a13cbd..a2fbca2bb 100644
          case LLM_ARCH_COGVLM:
              {
                  llm = std::make_unique<llm_build_cogvlm>(*this, params);
-@@ -9161,6 +9320,14 @@ int32_t llama_model_n_swa(const llama_model * model) {
+@@ -9161,6 +9325,14 @@ int32_t llama_model_n_swa(const llama_model * model) {
      return model->hparams.n_swa;
  }
  
@@ -11114,7 +11122,7 @@ index 9e2a13cbd..a2fbca2bb 100644
  uint32_t llama_model_n_cls_out(const struct llama_model * model) {
      return model->hparams.n_cls_out;
  }
-@@ -9250,6 +9417,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
+@@ -9250,6 +9422,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
          case LLM_ARCH_ERNIE4_5_MOE:
          case LLM_ARCH_MISTRAL3:
          case LLM_ARCH_MISTRAL4:
@@ -11122,7 +11130,7 @@ index 9e2a13cbd..a2fbca2bb 100644
          case LLM_ARCH_LLAMA_EMBED:
          case LLM_ARCH_MAINCODER:
          case LLM_ARCH_GLM_DSA:
-@@ -9274,6 +9442,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
+@@ -9274,6 +9447,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
          case LLM_ARCH_QWEN2MOE:
          case LLM_ARCH_QWEN3:
          case LLM_ARCH_QWEN3MOE:
@@ -11177,7 +11185,7 @@ index 5f101bd63..06e2c2e3a 100644
      //Dense linear projections for SentenceTransformers models like embeddinggemma
 diff --git a/src/models/dflash.cpp b/src/models/dflash.cpp
 new file mode 100644
-index 000000000..82a13ccc8
+index 000000000..dd26a30a4
 --- /dev/null
 +++ b/src/models/dflash.cpp
 @@ -0,0 +1,161 @@
@@ -11185,7 +11193,7 @@ index 000000000..82a13ccc8
 +
 +ggml_tensor * llm_build_dflash_encode::build_inp_embd() const {
 +    const int64_t n_target_layer_ids = (int64_t) hparams.dflash_target_layer_ids.size();
-+    const int64_t n_embd_target_features = n_target_layer_ids * n_embd;
++    const int64_t n_embd_target_features = n_target_layer_ids * hparams.dflash_target_hidden_size;
 +
 +    auto inp_target = std::make_unique<llm_graph_input_embd>(n_embd_target_features);
 +    inp_target->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd_target_features, n_tokens);

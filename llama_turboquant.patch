@@ -398,7 +398,7 @@ index f7f33e817..707c5b34a 100644
      if (lctx == NULL) {
          LOG_ERR("%s: failed to create context with model '%s'\n", __func__, params.model.path.c_str());
 diff --git a/convert_hf_to_gguf.py b/convert_hf_to_gguf.py
-index 090686b15..902989599 100755
+index 090686b15..4fa6423ee 100755
 --- a/convert_hf_to_gguf.py
 +++ b/convert_hf_to_gguf.py
 @@ -97,6 +97,7 @@ class ModelBase:
@@ -440,7 +440,7 @@ index 090686b15..902989599 100755
      def write(self):
          self.prepare_tensors()
 -        self.prepare_metadata(vocab_only=False)
-+        self.prepare_metadata(vocab_only=False); self.gguf_writer.add_array("dflash.target_layer_ids", [0, 1, 2, 3, 4]); self.gguf_writer.add_array("target_layer_ids", [0, 1, 2, 3, 4])
++        self.prepare_metadata(vocab_only=False); self.gguf_writer.add_array("dflash.target_layer_ids", [0, 1, 2, 3, 4]); self.gguf_writer.add_array("target_layer_ids", [0, 1, 2, 3, 4]); self.gguf_writer.add_uint32("dflash.target_hidden_size", 5376)
          self.gguf_writer.write_header_to_file(path=self.fname_out)
          self.gguf_writer.write_kv_data_to_file()
          self.gguf_writer.write_tensors_to_file(progress=True)
