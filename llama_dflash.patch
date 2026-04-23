@@ -1,5 +1,5 @@
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 85d84e5cc..638446aff 100644
+index 85d84e5cc..6d9e44ac8 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
 @@ -3087,7 +3087,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
@@ -30,14 +30,14 @@ index 85d84e5cc..638446aff 100644
 +        [](common_params & params) {
 +            params.speculative.eagle3 = true;
 +        }
-+    ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_CLI}));
++    ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
 +    add_opt(common_arg(
 +        {"--dflash"},
 +        "enable DFlash speculative decoding (requires -md draft_model)",
 +        [](common_params & params) {
 +            params.speculative.dflash = true;
 +        }
-+    ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_CLI}));
++    ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
      add_opt(common_arg(
          {"-cd", "--ctx-size-draft"}, "N",
          string_format("size of the prompt context for the draft model (default: %d, 0 = loaded from model)", params.speculative.n_ctx),
