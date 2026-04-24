@@ -398,7 +398,7 @@ index f7f33e817..707c5b34a 100644
      if (lctx == NULL) {
          LOG_ERR("%s: failed to create context with model '%s'\n", __func__, params.model.path.c_str());
 diff --git a/convert_hf_to_gguf.py b/convert_hf_to_gguf.py
-index 090686b15..4fa6423ee 100755
+index 090686b15..abb591da0 100755
 --- a/convert_hf_to_gguf.py
 +++ b/convert_hf_to_gguf.py
 @@ -97,6 +97,7 @@ class ModelBase:
@@ -435,15 +435,6 @@ index 090686b15..4fa6423ee 100755
          return new_name
  
      def set_gguf_parameters(self):
-@@ -932,7 +934,7 @@ class ModelBase:
- 
-     def write(self):
-         self.prepare_tensors()
--        self.prepare_metadata(vocab_only=False)
-+        self.prepare_metadata(vocab_only=False); self.gguf_writer.add_array("dflash.target_layer_ids", [0, 1, 2, 3, 4]); self.gguf_writer.add_array("target_layer_ids", [0, 1, 2, 3, 4]); self.gguf_writer.add_uint32("dflash.target_hidden_size", 5376)
-         self.gguf_writer.write_header_to_file(path=self.fname_out)
-         self.gguf_writer.write_kv_data_to_file()
-         self.gguf_writer.write_tensors_to_file(progress=True)
 @@ -2809,6 +2811,9 @@ class StableLMModel(TextModel):
      "VLlama3ForCausalLM",
      "LlavaForConditionalGeneration",
@@ -627,13 +618,19 @@ index 090686b15..4fa6423ee 100755
          if self._experts is not None:
              # flatten `list[dict[str, Tensor]]` into `list[str]`
              experts = [k for d in self._experts for k in d.keys()]
-@@ -4743,6 +4882,47 @@ class Qwen3Model(Qwen2Model):
+@@ -4743,6 +4882,80 @@ class Qwen3Model(Qwen2Model):
          yield from super().modify_tensors(data_torch, name, bid)
  
  
 +@ModelBase.register("DFlashDraftModel")
 +class DFlashModel(Qwen3Model):
 +    model_arch = gguf.MODEL_ARCH.DFLASH
++
++    def __init__(self, *args, **kwargs):
++        super().__init__(*args, **kwargs)
++        if "transformer_layer_config" in self.hparams:
++            self.hparams = {**self.hparams, **self.hparams["transformer_layer_config"]}
++        self.block_count = self.find_hparam(["n_layers", "num_hidden_layers", "n_layer", "num_layers"])
 +
 +    def set_vocab(self):
 +        if self.target_model_dir is None:
@@ -649,23 +646,50 @@ index 090686b15..4fa6423ee 100755
 +
 +    def set_gguf_parameters(self):
 +        super().set_gguf_parameters()
-+        block_size = self.hparams.get("block_size", 16)
++        # DFlash speculator block count
++        self.gguf_writer.add_block_count(self.block_count)
++
++        block_size = int(self.hparams.get("block_size", 16))
 +        self.gguf_writer.add_uint32(f"{self.gguf_writer.arch}.block_size", block_size)
 +        dflash_config = self.hparams.get("dflash_config", {})
-+        target_layer_ids = dflash_config.get("target_layer_ids", [])
++        target_layer_ids = dflash_config.get("target_layer_ids", self.hparams.get("aux_hidden_state_layer_ids", [0, 1, 2, 3, 4]))
 +        if target_layer_ids:
-+            extract_layer_ids = [i + 1 for i in target_layer_ids]
-+            self.gguf_writer.add_array(f"{self.gguf_writer.arch}.target_layer_ids", extract_layer_ids)
-+        mask_token_id = dflash_config.get("mask_token_id", None)
++            # ensure all are integers
++            target_layer_ids = [int(i) for i in target_layer_ids]
++            self.gguf_writer.add_array(f"{self.gguf_writer.arch}.target_layer_ids", target_layer_ids)
++
++        mask_token_id = self.hparams.get("mask_token_id")
++        if mask_token_id is None:
++            mask_token_id = dflash_config.get("mask_token_id", 4)
 +        if mask_token_id is not None:
-+            self.gguf_writer.add_uint32(f"{self.gguf_writer.arch}.mask_token_id", mask_token_id)
++            self.gguf_writer.add_uint32(f"{self.gguf_writer.arch}.mask_token_id", int(mask_token_id))
++
++        target_hidden_size = self.hparams.get("target_hidden_size")
++        if target_hidden_size is None:
++            target_hidden_size = 5376
++        self.gguf_writer.add_uint32(f"{self.gguf_writer.arch}.target_hidden_size", int(target_hidden_size))
 +
 +    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
 +        if name == "fc.weight":
++            # In torch, Linear weight is [out_features, in_features] -> [2304, 26880].
++            # GGUF export keeps it as [2304, 26880], which maps to ne0=26880, ne1=2304.
++            # This perfectly matches create_tensor({26880, 2304}) -> {n_embd_target_features, hparams.n_embd}.
 +            yield (name, data_torch)
 +            return
 +        if name == "hidden_norm.weight":
 +            yield ("hidden_norm.weight", data_torch)
++            return
++        if name == "embed_tokens.weight" or name == "model.embed_tokens.weight":
++            yield ("token_embd.weight", data_torch)
++            return
++        if name == "lm_head.weight" or name == "model.lm_head.weight":
++            yield ("output.weight", data_torch)
++            return
++        if name in ("d2t", "model.d2t"):
++            yield ("token_embd.d2t", data_torch)
++            return
++        if name in ("t2d", "model.t2d"):
++            yield ("token_embd.t2d", data_torch)
 +            return
 +        if not name.startswith("model."):
 +            name = "model." + name
@@ -675,7 +699,7 @@ index 090686b15..4fa6423ee 100755
  @ModelBase.register("Qwen3MoeForCausalLM")
  class Qwen3MoeModel(Qwen2MoeModel):
      model_arch = gguf.MODEL_ARCH.QWEN3MOE
-@@ -13207,6 +13387,7 @@ class LazyTorchTensor(gguf.LazyBase):
+@@ -13207,6 +13420,7 @@ class LazyTorchTensor(gguf.LazyBase):
          torch.float16: np.float16,
          torch.float32: np.float32,
          torch.uint8: np.uint8,
@@ -683,7 +707,7 @@ index 090686b15..4fa6423ee 100755
      }
  
      # only used when byteswapping data. Only correct size is needed
-@@ -13368,6 +13549,10 @@ def parse_args() -> argparse.Namespace:
+@@ -13368,6 +13582,10 @@ def parse_args() -> argparse.Namespace:
          "--no-tensor-first-split", action="store_true",
          help="do not add tensors to the first split (disabled by default)"
      )
@@ -694,7 +718,7 @@ index 090686b15..4fa6423ee 100755
      parser.add_argument(
          "--metadata", type=Path,
          help="Specify the path for an authorship metadata override file"
-@@ -13552,6 +13737,7 @@ def main() -> None:
+@@ -13552,6 +13770,7 @@ def main() -> None:
                                       small_first_shard=args.no_tensor_first_split,
                                       remote_hf_model_id=hf_repo_id, disable_mistral_community_chat_template=disable_mistral_community_chat_template,
                                       sentence_transformers_dense_modules=args.sentence_transformers_dense_modules,
@@ -8969,6 +8993,107 @@ index eda041f45..cbc53dc95 100644
  };
  
  const struct ggml_type_traits * ggml_get_type_traits(enum ggml_type type) {
+diff --git a/gguf-py/gguf/constants.py b/gguf-py/gguf/constants.py
+index 83ae51ce9..b5bf0d54b 100644
+--- a/gguf-py/gguf/constants.py
++++ b/gguf-py/gguf/constants.py
+@@ -152,6 +152,9 @@ class Keys:
+         SWIGLU_CLAMP_SHEXP                = "{arch}.swiglu_clamp_shexp"
+         DENSE_FEAT_IN_SIZE                = "{arch}.{dense}_feat_in"
+         DENSE_FEAT_OUT_SIZE               = "{arch}.{dense}_feat_out"
++        EAGLE3_EXTRACT_LAYERS             = "{arch}.extract_layers"
++        EAGLE3_TARGET_HIDDEN_SIZE         = "{arch}.target_hidden_size"
++        EAGLE3_NORM_BEFORE_RESIDUAL       = "{arch}.norm_before_residual"
+ 
+     class Attention:
+         HEAD_COUNT                   = "{arch}.attention.head_count"
+@@ -490,6 +493,8 @@ class MODEL_ARCH(IntEnum):
+     PANGU_EMBED      = auto()
+     MISTRAL3         = auto()
+     MISTRAL4         = auto()
++    EAGLE3           = auto()
++    DFLASH           = auto()
+     PADDLEOCR        = auto()
+     MIMO2            = auto()
+     STEP35           = auto()
+@@ -844,6 +849,13 @@ class MODEL_TENSOR(IntEnum):
+     NEXTN_HNORM          = auto()
+     NEXTN_SHARED_HEAD_HEAD = auto()
+     NEXTN_SHARED_HEAD_NORM = auto()
++    # EAGLE3 specific tensors
++    EAGLE3_FC          = auto()  # feature fusion layer
++    EAGLE3_HIDDEN_NORM = auto()  # hidden normalization
++    EAGLE3_D2T         = auto()  # draft to target vocabulary mapping
++    # DFlash
++    DFLASH_FC          = auto()  # feature fusion layer
++    DFLASH_HIDDEN_NORM = auto()  # hidden normalization
+     # lfm2 audio
+     A_ENC_NORM_CONV        = auto()
+     A_ENC_LINEAR_POS       = auto()
+@@ -977,6 +989,8 @@ MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
+     MODEL_ARCH.PANGU_EMBED:      "pangu-embedded",
+     MODEL_ARCH.MISTRAL3:         "mistral3",
+     MODEL_ARCH.MISTRAL4:         "mistral4",
++    MODEL_ARCH.EAGLE3:           "eagle3",
++    MODEL_ARCH.DFLASH:           "dflash",
+     MODEL_ARCH.PADDLEOCR:        "paddleocr",
+     MODEL_ARCH.MIMO2:            "mimo2",
+     MODEL_ARCH.STEP35:           "step35",
+@@ -1340,6 +1354,11 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
+     MODEL_TENSOR.NEXTN_HNORM:               "blk.{bid}.nextn.hnorm",
+     MODEL_TENSOR.NEXTN_SHARED_HEAD_HEAD:    "blk.{bid}.nextn.shared_head_head",
+     MODEL_TENSOR.NEXTN_SHARED_HEAD_NORM:    "blk.{bid}.nextn.shared_head_norm",
++    MODEL_TENSOR.EAGLE3_FC:                 "fc",
++    MODEL_TENSOR.EAGLE3_HIDDEN_NORM:        "blk.{bid}.hidden_norm",
++    MODEL_TENSOR.EAGLE3_D2T:                "d2t",
++    MODEL_TENSOR.DFLASH_FC:                 "fc",
++    MODEL_TENSOR.DFLASH_HIDDEN_NORM:        "hidden_norm",
+ }
+ 
+ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
+@@ -3773,6 +3792,42 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
+         MODEL_TENSOR.FFN_UP_SHEXP,
+         MODEL_TENSOR.FFN_EXP_PROBS_B,
+     ],
++    MODEL_ARCH.EAGLE3: [
++        MODEL_TENSOR.TOKEN_EMBD,
++        MODEL_TENSOR.OUTPUT_NORM,
++        MODEL_TENSOR.OUTPUT,
++        MODEL_TENSOR.ROPE_FREQS,
++        MODEL_TENSOR.ATTN_NORM,
++        MODEL_TENSOR.ATTN_Q,
++        MODEL_TENSOR.ATTN_K,
++        MODEL_TENSOR.ATTN_V,
++        MODEL_TENSOR.ATTN_OUT,
++        MODEL_TENSOR.FFN_NORM,
++        MODEL_TENSOR.FFN_GATE,
++        MODEL_TENSOR.FFN_DOWN,
++        MODEL_TENSOR.FFN_UP,
++        MODEL_TENSOR.EAGLE3_FC,
++        MODEL_TENSOR.EAGLE3_HIDDEN_NORM,
++        MODEL_TENSOR.EAGLE3_D2T,
++    ],
++    MODEL_ARCH.DFLASH: [
++        MODEL_TENSOR.TOKEN_EMBD,
++        MODEL_TENSOR.OUTPUT_NORM,
++        MODEL_TENSOR.OUTPUT,
++        MODEL_TENSOR.ATTN_NORM,
++        MODEL_TENSOR.ATTN_Q,
++        MODEL_TENSOR.ATTN_Q_NORM,
++        MODEL_TENSOR.ATTN_K,
++        MODEL_TENSOR.ATTN_K_NORM,
++        MODEL_TENSOR.ATTN_V,
++        MODEL_TENSOR.ATTN_OUT,
++        MODEL_TENSOR.FFN_NORM,
++        MODEL_TENSOR.FFN_GATE,
++        MODEL_TENSOR.FFN_DOWN,
++        MODEL_TENSOR.FFN_UP,
++        MODEL_TENSOR.DFLASH_FC,
++        MODEL_TENSOR.DFLASH_HIDDEN_NORM,
++    ],
+     MODEL_ARCH.MIMO2: [
+         MODEL_TENSOR.TOKEN_EMBD,
+         MODEL_TENSOR.OUTPUT_NORM,
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
 index 8126249e1..74e54da88 100644
 --- a/src/llama-context.cpp

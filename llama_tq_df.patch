@@ -916,7 +916,7 @@ index 20e38bec4..4980c03da 100644
              }
              case COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE: {
 diff --git a/convert_hf_to_gguf.py b/convert_hf_to_gguf.py
-index 090686b15..4fa6423ee 100755
+index 090686b15..abb591da0 100755
 --- a/convert_hf_to_gguf.py
 +++ b/convert_hf_to_gguf.py
 @@ -97,6 +97,7 @@ class ModelBase:
@@ -953,15 +953,6 @@ index 090686b15..4fa6423ee 100755
          return new_name
  
      def set_gguf_parameters(self):
-@@ -932,7 +934,7 @@ class ModelBase:
- 
-     def write(self):
-         self.prepare_tensors()
--        self.prepare_metadata(vocab_only=False)
-+        self.prepare_metadata(vocab_only=False); self.gguf_writer.add_array("dflash.target_layer_ids", [0, 1, 2, 3, 4]); self.gguf_writer.add_array("target_layer_ids", [0, 1, 2, 3, 4]); self.gguf_writer.add_uint32("dflash.target_hidden_size", 5376)
-         self.gguf_writer.write_header_to_file(path=self.fname_out)
-         self.gguf_writer.write_kv_data_to_file()
-         self.gguf_writer.write_tensors_to_file(progress=True)
 @@ -2809,6 +2811,9 @@ class StableLMModel(TextModel):
      "VLlama3ForCausalLM",
      "LlavaForConditionalGeneration",
@@ -1145,13 +1136,19 @@ index 090686b15..4fa6423ee 100755
          if self._experts is not None:
              # flatten `list[dict[str, Tensor]]` into `list[str]`
              experts = [k for d in self._experts for k in d.keys()]
-@@ -4743,6 +4882,47 @@ class Qwen3Model(Qwen2Model):
+@@ -4743,6 +4882,80 @@ class Qwen3Model(Qwen2Model):
          yield from super().modify_tensors(data_torch, name, bid)
  
  
 +@ModelBase.register("DFlashDraftModel")
 +class DFlashModel(Qwen3Model):
 +    model_arch = gguf.MODEL_ARCH.DFLASH
++
++    def __init__(self, *args, **kwargs):
++        super().__init__(*args, **kwargs)
++        if "transformer_layer_config" in self.hparams:
++            self.hparams = {**self.hparams, **self.hparams["transformer_layer_config"]}
++        self.block_count = self.find_hparam(["n_layers", "num_hidden_layers", "n_layer", "num_layers"])
 +
 +    def set_vocab(self):
 +        if self.target_model_dir is None:
@@ -1167,23 +1164,50 @@ index 090686b15..4fa6423ee 100755
 +
 +    def set_gguf_parameters(self):
 +        super().set_gguf_parameters()
-+        block_size = self.hparams.get("block_size", 16)
++        # DFlash speculator block count
++        self.gguf_writer.add_block_count(self.block_count)
++
++        block_size = int(self.hparams.get("block_size", 16))
 +        self.gguf_writer.add_uint32(f"{self.gguf_writer.arch}.block_size", block_size)
 +        dflash_config = self.hparams.get("dflash_config", {})
-+        target_layer_ids = dflash_config.get("target_layer_ids", [])
++        target_layer_ids = dflash_config.get("target_layer_ids", self.hparams.get("aux_hidden_state_layer_ids", [0, 1, 2, 3, 4]))
 +        if target_layer_ids:
-+            extract_layer_ids = [i + 1 for i in target_layer_ids]
-+            self.gguf_writer.add_array(f"{self.gguf_writer.arch}.target_layer_ids", extract_layer_ids)
-+        mask_token_id = dflash_config.get("mask_token_id", None)
++            # ensure all are integers
++            target_layer_ids = [int(i) for i in target_layer_ids]
++            self.gguf_writer.add_array(f"{self.gguf_writer.arch}.target_layer_ids", target_layer_ids)
++
++        mask_token_id = self.hparams.get("mask_token_id")
++        if mask_token_id is None:
++            mask_token_id = dflash_config.get("mask_token_id", 4)
 +        if mask_token_id is not None:
-+            self.gguf_writer.add_uint32(f"{self.gguf_writer.arch}.mask_token_id", mask_token_id)
++            self.gguf_writer.add_uint32(f"{self.gguf_writer.arch}.mask_token_id", int(mask_token_id))
++
++        target_hidden_size = self.hparams.get("target_hidden_size")
++        if target_hidden_size is None:
++            target_hidden_size = 5376
++        self.gguf_writer.add_uint32(f"{self.gguf_writer.arch}.target_hidden_size", int(target_hidden_size))
 +
 +    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
 +        if name == "fc.weight":
++            # In torch, Linear weight is [out_features, in_features] -> [2304, 26880].
++            # GGUF export keeps it as [2304, 26880], which maps to ne0=26880, ne1=2304.
++            # This perfectly matches create_tensor({26880, 2304}) -> {n_embd_target_features, hparams.n_embd}.
 +            yield (name, data_torch)
 +            return
 +        if name == "hidden_norm.weight":
 +            yield ("hidden_norm.weight", data_torch)
++            return
++        if name == "embed_tokens.weight" or name == "model.embed_tokens.weight":
++            yield ("token_embd.weight", data_torch)
++            return
++        if name == "lm_head.weight" or name == "model.lm_head.weight":
++            yield ("output.weight", data_torch)
++            return
++        if name in ("d2t", "model.d2t"):
++            yield ("token_embd.d2t", data_torch)
++            return
++        if name in ("t2d", "model.t2d"):
++            yield ("token_embd.t2d", data_torch)
 +            return
 +        if not name.startswith("model."):
 +            name = "model." + name
@@ -1193,7 +1217,7 @@ index 090686b15..4fa6423ee 100755
  @ModelBase.register("Qwen3MoeForCausalLM")
  class Qwen3MoeModel(Qwen2MoeModel):
      model_arch = gguf.MODEL_ARCH.QWEN3MOE
-@@ -13207,6 +13387,7 @@ class LazyTorchTensor(gguf.LazyBase):
+@@ -13207,6 +13420,7 @@ class LazyTorchTensor(gguf.LazyBase):
          torch.float16: np.float16,
          torch.float32: np.float32,
          torch.uint8: np.uint8,
@@ -1201,7 +1225,7 @@ index 090686b15..4fa6423ee 100755
      }
  
      # only used when byteswapping data. Only correct size is needed
-@@ -13368,6 +13549,10 @@ def parse_args() -> argparse.Namespace:
+@@ -13368,6 +13582,10 @@ def parse_args() -> argparse.Namespace:
          "--no-tensor-first-split", action="store_true",
          help="do not add tensors to the first split (disabled by default)"
      )
@@ -1212,7 +1236,7 @@ index 090686b15..4fa6423ee 100755
      parser.add_argument(
          "--metadata", type=Path,
          help="Specify the path for an authorship metadata override file"
-@@ -13552,6 +13737,7 @@ def main() -> None:
+@@ -13552,6 +13770,7 @@ def main() -> None:
                                       small_first_shard=args.no_tensor_first_split,
                                       remote_hf_model_id=hf_repo_id, disable_mistral_community_chat_template=disable_mistral_community_chat_template,
                                       sentence_transformers_dense_modules=args.sentence_transformers_dense_modules,
@@ -9687,7 +9711,7 @@ index eda041f45..cbc53dc95 100644
  
  const struct ggml_type_traits * ggml_get_type_traits(enum ggml_type type) {
 diff --git a/gguf-py/gguf/constants.py b/gguf-py/gguf/constants.py
-index 83ae51ce9..ce42394d9 100644
+index 83ae51ce9..b5bf0d54b 100644
 --- a/gguf-py/gguf/constants.py
 +++ b/gguf-py/gguf/constants.py
 @@ -152,6 +152,9 @@ class Keys:
@@ -9744,7 +9768,7 @@ index 83ae51ce9..ce42394d9 100644
  }
  
  MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
-@@ -3773,6 +3792,40 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
+@@ -3773,6 +3792,42 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
          MODEL_TENSOR.FFN_UP_SHEXP,
          MODEL_TENSOR.FFN_EXP_PROBS_B,
      ],
@@ -9767,7 +9791,9 @@ index 83ae51ce9..ce42394d9 100644
 +        MODEL_TENSOR.EAGLE3_D2T,
 +    ],
 +    MODEL_ARCH.DFLASH: [
++        MODEL_TENSOR.TOKEN_EMBD,
 +        MODEL_TENSOR.OUTPUT_NORM,
++        MODEL_TENSOR.OUTPUT,
 +        MODEL_TENSOR.ATTN_NORM,
 +        MODEL_TENSOR.ATTN_Q,
 +        MODEL_TENSOR.ATTN_Q_NORM,
@@ -10900,7 +10926,7 @@ index 09102f549..d6e67924e 100644
  
          res = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, nrot, nrot);
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index 4e65a45a5..832fc990c 100644
+index 4e65a45a5..83518169a 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
 @@ -503,6 +503,7 @@ namespace GGUFMeta {
@@ -10911,11 +10937,32 @@ index 4e65a45a5..832fc990c 100644
      template bool llama_model_loader::get_key_or_arr<std::array<uint32_t, 512>>(enum llm_kv kid, std::array<uint32_t, 512> & result, uint32_t n, bool required);
      template bool llama_model_loader::get_key_or_arr<std::array<float, 512>>(enum llm_kv kid, std::array<float, 512> & result, uint32_t n, bool required);
  
+@@ -1263,10 +1264,11 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+         }
+     }
+ 
+-    LLAMA_LOG_DEBUG("%s: loading tensor %s\n", __func__, tn.str().c_str());
++    LLAMA_LOG_INFO("%s: loading tensor %s\n", __func__, tn.str().c_str());
+     const struct ggml_tensor * cur = check_tensor_dims(tn.str(), ne, !(flags & TENSOR_NOT_REQUIRED));
+ 
+     if (cur == NULL) {
++        LLAMA_LOG_WARN("%s: tensor %s not found in model\n", __func__, tn.str().c_str());
+         return NULL;
+     }
+ 
+@@ -1314,6 +1316,7 @@ struct ggml_tensor * llama_model_loader::create_tensor_as_view(struct ggml_conte
+ 
+ void llama_model_loader::done_getting_tensors() const {
+     if (n_created != n_tensors) {
++        LLAMA_LOG_ERROR("%s: wrong number of tensors; expected %d, got %d. Check debug logs for full list of created tensors.\n", __func__, n_tensors, n_created);
+         throw std::runtime_error(format("%s: wrong number of tensors; expected %d, got %d", __func__, n_tensors, n_created));
+     }
+     if (n_tensors_moved > 0) {
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 9e2a13cbd..c805f83db 100644
+index 9e2a13cbd..2792298dd 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
-@@ -2758,6 +2758,62 @@ void llama_model::load_hparams(llama_model_loader & ml) {
+@@ -2758,6 +2758,63 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                      default: type = LLM_TYPE_UNKNOWN;
                  }
              } break;
@@ -10950,6 +10997,7 @@ index 9e2a13cbd..c805f83db 100644
 +            } break;
 +        case LLM_ARCH_DFLASH:
 +            {
++                ml.get_key(LLM_KV_BLOCK_COUNT, hparams.n_layer);
 +                ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
 +
 +                ml.get_key(LLM_KV_DFLASH_BLOCK_SIZE, hparams.dflash_block_size, false);
@@ -10978,7 +11026,7 @@ index 9e2a13cbd..c805f83db 100644
          case LLM_ARCH_COGVLM:
              {
                  ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
-@@ -7254,6 +7310,97 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
+@@ -7254,6 +7311,122 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                          layer.ffn_exp_probs_b = create_tensor(tn(LLM_TENSOR_FFN_EXP_PROBS_B, "bias", i), {n_expert}, 0);
                      }
                  } break;
@@ -11045,38 +11093,63 @@ index 9e2a13cbd..c805f83db 100644
 +                    const int64_t n_target_layer_ids = (int64_t)hparams.dflash_target_layer_ids.size();
 +                    const int64_t n_embd_target_features = n_target_layer_ids * hparams.dflash_target_hidden_size;
 +
-+                    fc = create_tensor(tn(LLM_TENSOR_DFLASH_FC, "weight"), {n_embd_target_features, n_embd}, 0);
-+                    dflash_hidden_norm = create_tensor(tn(LLM_TENSOR_DFLASH_HIDDEN_NORM, "weight"), {n_embd}, 0);
-+                    output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
++                    int64_t n_draft_vocab = n_vocab;
++                    const struct ggml_tensor * d2t_meta = ml.get_tensor_meta("token_embd.d2t");
++                    if (d2t_meta) {
++                        n_draft_vocab = d2t_meta->ne[0];
++                    } else if ((d2t_meta = ml.get_tensor_meta("model.d2t"))) {
++                        n_draft_vocab = d2t_meta->ne[0];
++                    }
 +
-+                    for (int i = 0; i < n_layer; ++i) {
++                    tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {hparams.n_embd, n_vocab}, TENSOR_NOT_REQUIRED);
++                    if (tok_embd == nullptr) {
++                        tok_embd = create_tensor(LLM_TN_IMPL(LLM_ARCH_DFLASH, LLM_TENSOR_TOKEN_EMBD, "model.embed_tokens.weight", -1, -1), {hparams.n_embd, n_vocab}, 0);
++                    }
++
++                    fc = create_tensor(tn(LLM_TENSOR_DFLASH_FC, "weight"), {n_embd_target_features, hparams.n_embd}, 0);
++                    dflash_hidden_norm = create_tensor(tn(LLM_TENSOR_DFLASH_HIDDEN_NORM, "weight"), {hparams.n_embd}, 0);
++                    output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {hparams.n_embd}, 0);
++
++                    output = create_tensor(tn(LLM_TENSOR_OUTPUT, "weight"), {hparams.n_embd, n_draft_vocab}, TENSOR_NOT_REQUIRED);
++                    if (output == nullptr) {
++                        output = create_tensor(LLM_TN_IMPL(LLM_ARCH_DFLASH, LLM_TENSOR_OUTPUT, "model.lm_head.weight", -1, -1), {hparams.n_embd, n_draft_vocab}, 0);
++                    }
++
++                    // Hack tensors for DFlash
++                    create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "d2t"), {n_draft_vocab}, TENSOR_NOT_REQUIRED);
++                    create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "t2d"), {n_vocab}, TENSOR_NOT_REQUIRED);
++
++                    layers.resize(hparams.n_layer);
++                    for (int i = 0; i < (int) hparams.n_layer; ++i) {
 +                        auto & layer = layers[i];
 +
-+                        layer.attn_norm = create_tensor(tn(LLM_TENSOR_ATTN_NORM, "weight", i), {n_embd}, 0);
++                        layer.attn_norm = create_tensor(tn(LLM_TENSOR_ATTN_NORM, "weight", i), {hparams.n_embd}, 0);
 +
-+                        layer.wq = create_tensor(tn(LLM_TENSOR_ATTN_Q, "weight", i), {n_embd, n_embd_head_k * n_head}, 0);
-+                        layer.wk = create_tensor(tn(LLM_TENSOR_ATTN_K, "weight", i), {n_embd, n_embd_k_gqa}, 0);
-+                        layer.wv = create_tensor(tn(LLM_TENSOR_ATTN_V, "weight", i), {n_embd, n_embd_v_gqa}, 0);
-+                        layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_embd_head_k * n_head, n_embd}, 0);
++                        layer.wq = create_tensor(tn(LLM_TENSOR_ATTN_Q, "weight", i), {hparams.n_embd, n_embd_head_k * n_head}, 0);
++                        layer.wk = create_tensor(tn(LLM_TENSOR_ATTN_K, "weight", i), {hparams.n_embd, n_embd_k_gqa}, 0);
++                        layer.wv = create_tensor(tn(LLM_TENSOR_ATTN_V, "weight", i), {hparams.n_embd, n_embd_v_gqa}, 0);
++                        layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_embd_head_k * n_head, hparams.n_embd}, 0);
 +
 +                        layer.bq = create_tensor(tn(LLM_TENSOR_ATTN_Q,   "bias", i), {n_embd_head_k * n_head}, TENSOR_NOT_REQUIRED);
 +                        layer.bk = create_tensor(tn(LLM_TENSOR_ATTN_K,   "bias", i), {n_embd_k_gqa},          TENSOR_NOT_REQUIRED);
 +                        layer.bv = create_tensor(tn(LLM_TENSOR_ATTN_V,   "bias", i), {n_embd_v_gqa},          TENSOR_NOT_REQUIRED);
-+                        layer.bo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "bias", i), {n_embd},                TENSOR_NOT_REQUIRED);
++                        layer.bo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "bias", i), {hparams.n_embd},                TENSOR_NOT_REQUIRED);
 +
-+                        layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", i), {n_embd_head_k}, 0);
-+                        layer.attn_k_norm = create_tensor(tn(LLM_TENSOR_ATTN_K_NORM, "weight", i), {n_embd_head_k}, 0);
++                        layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", i), {n_embd_head_k}, TENSOR_NOT_REQUIRED);
++                        layer.attn_k_norm = create_tensor(tn(LLM_TENSOR_ATTN_K_NORM, "weight", i), {n_embd_head_k}, TENSOR_NOT_REQUIRED);
 +
-+                        layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, "weight", i), {n_embd}, 0);
-+                        layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", i), {n_embd, n_ff}, 0);
-+                        layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", i), {n_ff, n_embd}, 0);
-+                        layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", i), {n_embd, n_ff}, 0);
++                        layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, "weight", i), {hparams.n_embd}, 0);
++                        layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", i), {hparams.n_embd, n_ff}, 0);
++                        layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", i), {n_ff, hparams.n_embd}, 0);
++                        layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", i), {hparams.n_embd, n_ff}, 0);
++
++                        layer.rope_freqs = create_tensor(tn(LLM_TENSOR_ROPE_FREQS, "weight", i), {n_rot/2}, TENSOR_NOT_REQUIRED);
 +                    }
 +                } break;
              case LLM_ARCH_KIMI_LINEAR:
                  {
                      tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
-@@ -8441,6 +8588,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params,
+@@ -8441,6 +8614,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params,
          case LLM_ARCH_LLADA:
          case LLM_ARCH_LLADA_MOE:
          case LLM_ARCH_RND1:
@@ -11084,7 +11157,7 @@ index 9e2a13cbd..c805f83db 100644
              {
                  res = nullptr;
              } break;
-@@ -9031,6 +9179,22 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
+@@ -9031,6 +9205,22 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
              {
                  llm = std::make_unique<llm_build_minimax_m2>(*this, params);
              } break;
@@ -11107,7 +11180,7 @@ index 9e2a13cbd..c805f83db 100644
          case LLM_ARCH_COGVLM:
              {
                  llm = std::make_unique<llm_build_cogvlm>(*this, params);
-@@ -9161,6 +9325,14 @@ int32_t llama_model_n_swa(const llama_model * model) {
+@@ -9161,6 +9351,14 @@ int32_t llama_model_n_swa(const llama_model * model) {
      return model->hparams.n_swa;
  }
  
@@ -11122,7 +11195,7 @@ index 9e2a13cbd..c805f83db 100644
  uint32_t llama_model_n_cls_out(const struct llama_model * model) {
      return model->hparams.n_cls_out;
  }
-@@ -9250,6 +9422,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
+@@ -9250,6 +9448,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
          case LLM_ARCH_ERNIE4_5_MOE:
          case LLM_ARCH_MISTRAL3:
          case LLM_ARCH_MISTRAL4:
@@ -11130,7 +11203,7 @@ index 9e2a13cbd..c805f83db 100644
          case LLM_ARCH_LLAMA_EMBED:
          case LLM_ARCH_MAINCODER:
          case LLM_ARCH_GLM_DSA:
-@@ -9274,6 +9447,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
+@@ -9274,6 +9473,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
          case LLM_ARCH_QWEN2MOE:
          case LLM_ARCH_QWEN3:
          case LLM_ARCH_QWEN3MOE:
