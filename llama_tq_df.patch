@@ -1,5 +1,5 @@
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 85d84e5cc..870208b44 100644
+index 85d84e5cc..a3a5dadde 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
 @@ -391,9 +391,33 @@ const std::vector<ggml_type> kv_cache_types = {
@@ -125,7 +125,21 @@ index 85d84e5cc..870208b44 100644
      add_opt(common_arg(
          {"-cd", "--ctx-size-draft"}, "N",
          string_format("size of the prompt context for the draft model (default: %d, 0 = loaded from model)", params.speculative.n_ctx),
-@@ -3504,7 +3567,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3474,6 +3537,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+             params.speculative.n_ctx = value;
+         }
+     ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_CTX_SIZE_DRAFT"));
++    add_opt(common_arg(
++        {"-bd", "--batch-size-draft"}, "N",
++        string_format("logical maximum batch size for draft model (default: %d, 0 = same as target model)", params.speculative.n_batch),
++        [](common_params & params, int value) {
++            params.speculative.n_batch = value;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_BATCH_SIZE_DRAFT"));
+     add_opt(common_arg(
+         {"-devd", "--device-draft"}, "<dev1,dev2,..>",
+         "comma-separated list of devices to use for offloading the draft model (none = don't offload)\n"
+@@ -3504,7 +3574,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
      ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_N_GPU_LAYERS_DRAFT"));
      add_opt(common_arg(
          {"-md", "--model-draft"}, "FNAME",
@@ -446,7 +460,7 @@ index f7f33e817..707c5b34a 100644
      if (lctx == NULL) {
          LOG_ERR("%s: failed to create context with model '%s'\n", __func__, params.model.path.c_str());
 diff --git a/common/common.h b/common/common.h
-index 9a8218433..b6680df1b 100644
+index 9a8218433..7cd730752 100644
 --- a/common/common.h
 +++ b/common/common.h
 @@ -159,6 +159,7 @@ enum common_speculative_type {
@@ -457,7 +471,7 @@ index 9a8218433..b6680df1b 100644
      COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE,  // simple self-speculative decoding
      COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K,   // self-speculative decoding with n-gram keys only
      COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V, // self-speculative decoding with n-gram keys and 4 m-gram values
-@@ -322,10 +323,14 @@ struct common_params_speculative {
+@@ -322,11 +323,16 @@ struct common_params_speculative {
  
      struct common_params_model mparams_dft;
  
@@ -470,8 +484,10 @@ index 9a8218433..b6680df1b 100644
 +    bool    dflash       = false; // use DFlash speculative decoding
 +
      int32_t n_ctx        = 0;  // draft context size
++    int32_t n_batch      = 0;  // draft batch size
      int32_t n_gpu_layers = -1; // number of layers to store in VRAM for the draft model (-1 - use default)
  
+     ggml_type cache_type_k = GGML_TYPE_F16; // KV cache data type for the K
 diff --git a/common/speculative.cpp b/common/speculative.cpp
 index 20e38bec4..4980c03da 100644
 --- a/common/speculative.cpp
@@ -11837,9 +11853,18 @@ index dc554b5b3..bdb67332e 100644
          cur = build_norm(inpL,
                  model.layers[il].attn_norm, NULL,
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 53f61b5a9..3be9619c5 100644
+index 53f61b5a9..3eee9bf5b 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
+@@ -774,7 +774,7 @@ private:
+ 
+             params_dft.n_parallel   = 1;
+             params_dft.n_ctx        = params_spec.n_ctx == 0 ? llama_n_ctx_seq(ctx) : params_spec.n_ctx;
+-            params_dft.n_batch      = llama_n_ctx_seq(ctx);
++            params_dft.n_batch      = params_spec.n_batch == 0 ? params_base.n_batch : params_spec.n_batch;
+             params_dft.devices      = params_spec.devices;
+             params_dft.model        = params_spec.mparams_dft;
+             params_dft.n_gpu_layers = params_spec.n_gpu_layers;
 @@ -797,7 +797,24 @@ private:
              }
  

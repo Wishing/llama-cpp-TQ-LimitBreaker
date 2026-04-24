@@ -1,8 +1,92 @@
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 85d84e5cc..6d9e44ac8 100644
+index 85d84e5cc..a3a5dadde 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
-@@ -3087,7 +3087,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -391,9 +391,33 @@ const std::vector<ggml_type> kv_cache_types = {
+     GGML_TYPE_IQ4_NL,
+     GGML_TYPE_Q5_0,
+     GGML_TYPE_Q5_1,
++    GGML_TYPE_TBQ3_0,
++    GGML_TYPE_TBQ4_0,
++    GGML_TYPE_TBQP3_0,
++    GGML_TYPE_TBQP4_0,
++    GGML_TYPE_TBQ3_1,
++    GGML_TYPE_TBQ4_1,
++    GGML_TYPE_TBQP3_1,
++    GGML_TYPE_TBQP4_1,
++    GGML_TYPE_TBQ3_2,
++    GGML_TYPE_TBQ4_2,
++    GGML_TYPE_TBQP3_2,
++    GGML_TYPE_TBQP4_2,
+ };
+ 
+ static ggml_type kv_cache_type_from_str(const std::string & s) {
++    // TurboQuant shorthand: "tbq3" → tbq3_0 (resolved to correct _N by head_dim later)
++    // Users don't need to know about _0/_1/_2 suffixes
++    static const std::unordered_map<std::string, ggml_type> tbq_shortcuts = {
++        {"tbq3",  GGML_TYPE_TBQ3_0},
++        {"tbq4",  GGML_TYPE_TBQ4_0},
++        {"tbqp3", GGML_TYPE_TBQP3_0},
++        {"tbqp4", GGML_TYPE_TBQP4_0},
++    };
++    auto it = tbq_shortcuts.find(s);
++    if (it != tbq_shortcuts.end()) {
++        return it->second;
++    }
+     for (const auto & type : kv_cache_types) {
+         if (ggml_type_name(type) == s) {
+             return type;
+@@ -403,9 +427,31 @@ static ggml_type kv_cache_type_from_str(const std::string & s) {
+ }
+ 
+ static std::string get_all_kv_cache_types() {
++    // Show user-friendly names: hide _0/_1/_2/_3/_4 TBQ suffixes,
++    // show shorthand (tbq3, tbqp3, etc.) instead
++    static const std::unordered_map<ggml_type, std::string> tbq_display = {
++        {GGML_TYPE_TBQ3_0,  "tbq3"},   {GGML_TYPE_TBQ4_0,  "tbq4"},
++        {GGML_TYPE_TBQP3_0, "tbqp3"},  {GGML_TYPE_TBQP4_0, "tbqp4"},
++    };
++    std::set<std::string> seen_tbq;
+     std::ostringstream msg;
++    bool first = true;
+     for (const auto & type : kv_cache_types) {
+-        msg << ggml_type_name(type) << (&type == &kv_cache_types.back() ? "" : ", ");
++        std::string name;
++        auto it = tbq_display.find(type);
++        if (it != tbq_display.end()) {
++            if (seen_tbq.count(it->second)) continue;
++            seen_tbq.insert(it->second);
++            name = it->second;
++        } else {
++            // Skip internal TBQ subtypes (_1, _2, _3, _4) from display
++            std::string raw = ggml_type_name(type);
++            if (raw.find("tbq") != std::string::npos || raw.find("tbqp") != std::string::npos) continue;
++            name = raw;
++        }
++        if (!first) msg << ", ";
++        msg << name;
++        first = false;
+     }
+     return msg.str();
+ }
+@@ -2011,6 +2057,8 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+         string_format(
+             "KV cache data type for K\n"
+             "allowed values: %s\n"
++            "(TurboQuant: tbq3, tbq4; with QJL: tbqp3, tbqp4)\n"
++            "tbqp3/4 saves ~75%% VRAM and is optimized for long context\n"
+             "(default: %s)",
+             get_all_kv_cache_types().c_str(),
+             ggml_type_name(params.cache_type_k)
+@@ -2024,6 +2072,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+         string_format(
+             "KV cache data type for V\n"
+             "allowed values: %s\n"
++            "(TurboQuant: tbq3, tbq4)\n"
+             "(default: %s)",
+             get_all_kv_cache_types().c_str(),
+             ggml_type_name(params.cache_type_v)
+@@ -3087,7 +3136,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
          [](common_params & params, bool value) {
              params.use_jinja = value;
          }
@@ -11,7 +95,7 @@ index 85d84e5cc..6d9e44ac8 100644
      add_opt(common_arg(
          {"--reasoning-format"}, "FORMAT",
          "controls whether thought tags are allowed and/or extracted from the response, and in which format they're returned; one of:\n"
-@@ -3143,7 +3143,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3143,7 +3192,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
          [](common_params & params, const std::string & value) {
              params.chat_template = value;
          }
@@ -20,7 +104,7 @@ index 85d84e5cc..6d9e44ac8 100644
      add_opt(common_arg(
          {"--chat-template-file"}, "JINJA_TEMPLATE_FILE",
          string_format(
-@@ -3467,6 +3467,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3467,6 +3516,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
              params.speculative.p_min = std::stof(value);
          }
      ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_DRAFT_P_MIN"));
@@ -41,7 +125,21 @@ index 85d84e5cc..6d9e44ac8 100644
      add_opt(common_arg(
          {"-cd", "--ctx-size-draft"}, "N",
          string_format("size of the prompt context for the draft model (default: %d, 0 = loaded from model)", params.speculative.n_ctx),
-@@ -3504,7 +3518,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3474,6 +3537,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+             params.speculative.n_ctx = value;
+         }
+     ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_CTX_SIZE_DRAFT"));
++    add_opt(common_arg(
++        {"-bd", "--batch-size-draft"}, "N",
++        string_format("logical maximum batch size for draft model (default: %d, 0 = same as target model)", params.speculative.n_batch),
++        [](common_params & params, int value) {
++            params.speculative.n_batch = value;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_BATCH_SIZE_DRAFT"));
+     add_opt(common_arg(
+         {"-devd", "--device-draft"}, "<dev1,dev2,..>",
+         "comma-separated list of devices to use for offloading the draft model (none = don't offload)\n"
+@@ -3504,7 +3574,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
      ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_N_GPU_LAYERS_DRAFT"));
      add_opt(common_arg(
          {"-md", "--model-draft"}, "FNAME",
@@ -51,7 +149,7 @@ index 85d84e5cc..6d9e44ac8 100644
              params.speculative.mparams_dft.path = value;
          }
 diff --git a/common/common.h b/common/common.h
-index 9a8218433..b6680df1b 100644
+index 9a8218433..7cd730752 100644
 --- a/common/common.h
 +++ b/common/common.h
 @@ -159,6 +159,7 @@ enum common_speculative_type {
@@ -62,7 +160,7 @@ index 9a8218433..b6680df1b 100644
      COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE,  // simple self-speculative decoding
      COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K,   // self-speculative decoding with n-gram keys only
      COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V, // self-speculative decoding with n-gram keys and 4 m-gram values
-@@ -322,10 +323,14 @@ struct common_params_speculative {
+@@ -322,11 +323,16 @@ struct common_params_speculative {
  
      struct common_params_model mparams_dft;
  
@@ -75,8 +173,10 @@ index 9a8218433..b6680df1b 100644
 +    bool    dflash       = false; // use DFlash speculative decoding
 +
      int32_t n_ctx        = 0;  // draft context size
++    int32_t n_batch      = 0;  // draft batch size
      int32_t n_gpu_layers = -1; // number of layers to store in VRAM for the draft model (-1 - use default)
  
+     ggml_type cache_type_k = GGML_TYPE_F16; // KV cache data type for the K
 diff --git a/common/speculative.cpp b/common/speculative.cpp
 index 20e38bec4..4980c03da 100644
 --- a/common/speculative.cpp
@@ -2936,9 +3036,18 @@ index dc554b5b3..bdb67332e 100644
          cur = build_norm(inpL,
                  model.layers[il].attn_norm, NULL,
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 53f61b5a9..3be9619c5 100644
+index 53f61b5a9..3eee9bf5b 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
+@@ -774,7 +774,7 @@ private:
+ 
+             params_dft.n_parallel   = 1;
+             params_dft.n_ctx        = params_spec.n_ctx == 0 ? llama_n_ctx_seq(ctx) : params_spec.n_ctx;
+-            params_dft.n_batch      = llama_n_ctx_seq(ctx);
++            params_dft.n_batch      = params_spec.n_batch == 0 ? params_base.n_batch : params_spec.n_batch;
+             params_dft.devices      = params_spec.devices;
+             params_dft.model        = params_spec.mparams_dft;
+             params_dft.n_gpu_layers = params_spec.n_gpu_layers;
 @@ -797,7 +797,24 @@ private:
              }
  
