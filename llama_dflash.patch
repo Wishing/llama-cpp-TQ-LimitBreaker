@@ -2715,6 +2715,31 @@ index 000000000..69ac3be8c
 +
 +    ggml_build_forward_expand(gf, cur);
 +}
+diff --git a/src/models/gemma4-iswa.cpp b/src/models/gemma4-iswa.cpp
+index c7fb77474..691f9549e 100644
+--- a/src/models/gemma4-iswa.cpp
++++ b/src/models/gemma4-iswa.cpp
+@@ -38,6 +38,20 @@ llm_build_gemma4_iswa::llm_build_gemma4_iswa(const llama_model & model, const ll
+     }
+ 
+     for (int il = 0; il < n_layer; ++il) {
++        // DFlash: Extract intermediate layer features from target model at layer INPUT
++        if (dflash && cparams.dflash_extract_enabled && !dflash->extract_layer_indices.empty()) {
++            static const char * dflash_extract_names[] = {
++                "dflash_extract_0", "dflash_extract_1", "dflash_extract_2",
++                "dflash_extract_3", "dflash_extract_4"
++            };
++            for (size_t i = 0; i < dflash->extract_layer_indices.size() && i < 5; ++i) {
++                if (dflash->extract_layer_indices[i] == il) {
++                    cb(inpL, dflash_extract_names[i], il);
++                    break;
++                }
++            }
++        }
++
+         const int64_t n_embd_head = hparams.n_embd_head_k(il);
+         GGML_ASSERT(n_embd_head == hparams.n_embd_head_v(il));
+ 
 diff --git a/src/models/llama.cpp b/src/models/llama.cpp
 index ddaa6c40f..19ed4d07c 100644
 --- a/src/models/llama.cpp
@@ -2911,24 +2936,30 @@ index dc554b5b3..bdb67332e 100644
          cur = build_norm(inpL,
                  model.layers[il].attn_norm, NULL,
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 53f61b5a9..e11be3f4e 100644
+index 53f61b5a9..3be9619c5 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
-@@ -797,7 +797,18 @@ private:
+@@ -797,7 +797,24 @@ private:
              }
  
              params_base.speculative.model_dft = model_dft.get();
 +            params_base.speculative.model_tgt = model;
              params_base.speculative.cparams_dft = common_context_params_to_llama(params_dft);
 +
-+            if (params_base.speculative.eagle3) {
-+                // EAGLE3 current limitation: extracted target features are per-context; multiple slots would overwrite each other
++            if (params_base.speculative.eagle3 || params_base.speculative.dflash) {
++                // EAGLE3/DFlash current limitation: extracted target features are per-context; multiple slots would overwrite each other
 +                if (params_base.n_parallel > 1) {
-+                    SRV_ERR("%s", "EAGLE3 speculative decoding is not supported with n_parallel > 1\n");
++                    SRV_ERR("%s", "EAGLE3/DFlash speculative decoding is not supported with n_parallel > 1\n");
 +                    return false;
 +                }
-+                llama_set_eagle3(ctx, model_dft.get());
-+                SRV_INF("%s", "EAGLE3 feature extraction enabled on target model\n");
++                
++                if (params_base.speculative.eagle3) {
++                    llama_set_eagle3(ctx, model_dft.get());
++                    SRV_INF("%s", "EAGLE3 feature extraction enabled on target model\n");
++                } else if (params_base.speculative.dflash) {
++                    llama_set_dflash(ctx, model_dft.get());
++                    SRV_INF("%s", "DFlash feature extraction enabled on target model\n");
++                }
 +            }
          }
  
