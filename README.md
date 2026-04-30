@@ -102,7 +102,7 @@ cmake --build build --config Release -j $(nproc) --target llama-server
     -md models/qwen3.5-dflash-draft.gguf \
     --spec-type dflash \
     -ngl 99 -ngld 99 \
-    -np 1 -c 98304 -cd 256 \
+    -np 1 -c 6048 -cd 256 \
     -fa on -b 256 -ub 64 \
     --port 1337 --jinja
 ```
