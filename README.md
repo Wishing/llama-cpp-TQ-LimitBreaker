@@ -93,16 +93,18 @@ cmake --build build --config Release -j $(nproc) --target llama-server
     --port 1337
 ```
 
-##### ⚡【极限速度】Qwen3.5-27B：100K 窗口下的“秒回”体验
-针对 Qwen 架构优化的极致吞吐配置。
+##### 💎【纯净 TQ】Qwen3.5-27B-UD-IQ3_XXS：最强 KV 压缩方案
+这是专门为 TurboQuant 优化的纯净配置，适用于需要极致显存节省的场景。
 
 ```bash
 ./build/bin/llama-server \
-    -m models/qwen3.5-27b-it.Q4_K_M.gguf \
-    -md models/qwen3.5-dflash-draft.gguf \
-    --spec-type dflash \
-    -ngl 99 -ngld 99 \
-    -np 1 -c 6048 -cd 256 \
-    -fa on -b 256 -ub 64 \
-    --port 1337 --jinja
+    -m models/Qwen3.5-27B-UD-IQ3_XXS.gguf \
+    -ngl 99 \
+    -fa on \
+    -c 12800 \
+    -b 512 \
+    -ctk turbo3_tcq \
+    -ctv turbo3_tcq \
+    --port 1337
 ```
+
