@@ -21,13 +21,13 @@
 
 ## 🛠️ 构建与注入指南 (Build Instructions)
 
-本项目提供三个不同的补丁，请根据您的需求选择：
+本项目提供三个补丁文件（dflash 及全功能补丁目前正在紧急适配中）：
 
-| 补丁文件 | 包含功能 | 适用场景 |
-| :--- | :--- | :--- |
-| **`llama_turboquant.patch`** | 仅 TurboQuant | 只需要 KV 缓存压缩（显存优化），不需要投机采样。 |
-| **`llama_dflash.patch`** | 仅 DFlash | 只需要投机采样加速，不需要 KV 缓存压缩。 |
-| **`llama_tq_df.patch`** | **TQ + DFlash (推荐)** | 同时启用 KV 压缩与投机加速，实现显存与速度的双重极限。 |
+| 补丁文件 | 包含功能 | 适用场景 | 状态 |
+| :--- | :--- | :--- | :--- |
+| **`llama_turboquant.patch`** | 仅 TurboQuant | 只需要 KV 缓存压缩（显存优化），不需要投机采样。 | ✅ **已发布 (稳定版)** |
+| **`llama_dflash.patch`** | 仅 DFlash | 只需要投机采样加速，不需要 KV 缓存压缩。 | 🚧 正在路上... |
+| **`llama_tq_df.patch`** | **TQ + DFlash** | 同时启用 KV 压缩与投机加速，实现显存与速度的双重极限。 | 🚧 正在路上... |
 
 ### 1. 准备代码库与锁定版本
 1. 克隆官方 llama.cpp 代码库：
@@ -40,20 +40,13 @@
    git checkout 82d3f4d3
    ```
 
-### 2. 应用补丁 (根据需求三选一)
+### 2. 应用补丁 (目前推荐方案 B)
 
-*   **方案 A (全能推荐)**：应用全功能补丁
-    ```bash
-    git apply /path/to/llama_tq_df.patch
-    ```
-*   **方案 B**：仅应用 TurboQuant 补丁
+*   **方案 B (推荐)**：应用 TurboQuant 补丁 (已解决 Prefill/Decode 质量问题)
     ```bash
     git apply /path/to/llama_turboquant.patch
     ```
-*   **方案 C**：仅应用 DFlash 补丁
-    ```bash
-    git apply /path/to/llama_dflash.patch
-    ```
+*   **注意**：方案 A (全能) 与 方案 C (DFlash) 目前正在进行架构优化，稍后更新。
 
 ### 3. 编译
 ```bash
