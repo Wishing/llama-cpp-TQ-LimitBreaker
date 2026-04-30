@@ -61,10 +61,11 @@ cmake --build build --config Release -j $(nproc) --target llama-server
 本补丁针对以下架构进行了深度优化和测试：
 - **Gemma 4 全系列**：完整支持其复杂的 SWA/ISWA 混合缓存对齐。
   - *测试模型：Gemma-4-31B-It-UD-IQ3_XXS.gguf*
-- **Qwopus 系列**：针对 Qwen 架构深度优化，包括：
+- **Qwopus & Qwen 3.5 系列**：针对 Qwen 架构深度优化，包括：
+  - `Qwen3.5-27B-It` (最新支持)
   - `Qwopus-GLM-Heretic-27B-dare-ties`
   - `Qwopus3.5-27B-v3`
-  - 所有基于 Qwen2 的 27B+ 衍生模型。
+  - 所有基于 Qwen2/2.5/3.5 的 27B+ 衍生模型。
 
 ---
 
@@ -72,39 +73,36 @@ cmake --build build --config Release -j $(nproc) --target llama-server
 
 | 参数 | 建议值 | 说明与优势 |
 | :--- | :--- | :--- |
-| **`-ctk`** | `tbqp3` / `tbqp4` | **TurboQuant Key 缓存量化**。`tbqp` 包含 QJL 优化，3-bit 可节省约 75% KV 显存，是实现 100K+ 上下文的核心。 |
-| **`-ctv`** | `tbq3` / `tbq4` | **TurboQuant Value 缓存量化**。配合 `-ctk` 使用，大幅降低长文本下的显存压力。 |
-| **`--dflash`** | (开关) | **启用 DFlash 投机引擎**。利用专用的 Draft 模型预测 Token，在不损失精度的前提下显著提升推理 TPS。 |
-| **`-md`** | `draft.gguf` | **指定 Draft 模型**。需配合 `--dflash` 使用，通常使用 0.1B~1B 规模的专用加速模型。 |
+| **`-ctk`** | `tbqp3` / `tbqp4` | **TurboQuant Key 缓存量化**。`tbqp` 包含 QJL 优化，3-bit 可节省约 75% KV 显存。 |
+| **`-ctv`** | `tbq3` / `tbq4` | **TurboQuant Value 缓存量化**。配合 `-ctk` 使用，大幅降低显存压力。 |
+| **`--spec-type`** | `dflash` | **启用 DFlash 投机引擎**。利用专用的 Draft 模型预测 Token，在不损失精度的前提下显著提升推理 TPS。 |
+| **`-md`** | `draft.gguf` | **指定 Draft 模型**。需配合 `--spec-type dflash` 使用。 |
 
 ---
 
 #### 💡 极客极限配置示例 (Ultimate Geek Examples)
 
 ##### 🌟【终极方案】Gemma-4-31B 满血全量：256K 极限上下文 + DFlash 加速
-这是本项目的“存在意义”：在单张 RTX 3090/4090 上，运行原本需要 4x A100 才能支撑的 256K 窗口，并保持丝滑的打字机速度。
-- **显存压缩**：3-bit TurboQuant 将 KV 占用从 ~120GB 压缩至 ~28GB（配合系统内存共享）。
-- **推理加速**：DFlash 投机采样抵消预填充延迟。
-
 ```bash
 ./build/bin/llama-server \
     -m models/gemma-4-31b-it-UD-IQ3_XXS.gguf \
     -md models/gemma-4-dflash-draft.gguf \
-    --dflash \
+    --spec-type dflash \
     -c 262144 -b 2048 -ub 1024 -ngl 99 -fa \
     -ctk tbqp3 -ctv tbq3 \
     --port 1337
 ```
 
-##### ⚡【极限速度】Qwopus-27B：100K 窗口下的“秒回”体验
+##### ⚡【极限速度】Qwen3.5-27B：100K 窗口下的“秒回”体验
 针对 Qwen 架构优化的极致吞吐配置。
 
 ```bash
 ./build/bin/llama-server \
-    -m models/Qwopus-GLM-Heretic-27B-dare-ties.gguf \
-    -md models/qwopus-27b-dflash-draft.gguf \
-    --dflash \
-    -c 98304 -b 1024 -ub 512 -ngl 99 -fa \
-    -ctk tbqp4 -ctv tbq4 \
-    --port 1337
+    -m models/qwen3.5-27b-it.Q4_K_M.gguf \
+    -md models/qwen3.5-dflash-draft.gguf \
+    --spec-type dflash \
+    -ngl 99 -ngld 99 \
+    -np 1 -c 98304 -cd 256 \
+    -fa on -b 256 -ub 64 \
+    --port 1337 --jinja
 ```
