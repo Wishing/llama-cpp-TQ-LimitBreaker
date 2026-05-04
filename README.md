@@ -26,8 +26,8 @@
 | 补丁文件 | 包含功能 | 适用场景 | 状态 |
 | :--- | :--- | :--- | :--- |
 | **`llama_turboquant.patch`** | 仅 TurboQuant | 只需要 KV 缓存压缩（显存优化），不需要投机采样。 | ✅ **已发布 (稳定版)** |
-| **`llama_dflash.patch`** | 仅 DFlash | 只需要投机采样加速，不需要 KV 缓存压缩。 | 🚧 正在路上... |
-| **`llama_tq_df.patch`** | **TQ + DFlash** | 同时启用 KV 压缩与投机加速，实现显存与速度的双重极限。 | 🚧 正在路上... |
+| **`llama_dflash.patch`** | 仅 DFlash | 只需要投机采样加速，不需要 KV 缓存压缩。 | ✅ **已发布 (稳定版)** |
+| **`llama_tq_df.patch`** | **TQ + DFlash** | 同时启用 KV 压缩与投机加速，实现显存与速度的双重极限。 | ✅ **已发布 (稳定版)** |
 
 ### 1. 准备代码库与锁定版本
 1. 克隆官方 llama.cpp 代码库：
@@ -40,13 +40,20 @@
    git checkout 518b5ffb
    ```
 
-### 2. 应用补丁 (目前推荐方案 B)
+### 2. 应用补丁 (目前推荐方案 A)
 
-*   **方案 B (推荐)**：应用 TurboQuant 补丁 (已解决 Prefill/Decode 质量问题)
+*   **方案 A (推荐 - 全能型)**：同时应用 TurboQuant 与 DFlash 补丁
+    ```bash
+    git apply /path/to/llama_tq_df.patch
+    ```
+*   **方案 B (显存优化型)**：仅应用 TurboQuant 补丁
     ```bash
     git apply /path/to/llama_turboquant.patch
     ```
-*   **注意**：方案 A (全能) 与 方案 C (DFlash) 目前正在进行架构优化，稍后更新。
+*   **方案 C (速度优化型)**：仅应用 DFlash 补丁
+    ```bash
+    git apply /path/to/llama_dflash.patch
+    ```
 
 ### 3. 编译
 ```bash
@@ -61,11 +68,9 @@ cmake --build build --config Release -j $(nproc) --target llama-server
 本补丁针对以下架构进行了深度优化和测试：
 - **Gemma 4 全系列**：完整支持其复杂的 SWA/ISWA 混合缓存对齐。
   - *测试模型：Gemma-4-31B-It-UD-IQ3_XXS.gguf*
-- **Qwopus & Qwen 3.5 系列**：针对 Qwen 架构深度优化，包括：
+- **Qwen 3.5 系列**：针对 Qwen 架构深度优化，包括：
   - `Qwen3.5-27B-It` (最新支持)
-  - `Qwopus-GLM-Heretic-27B-dare-ties`
-  - `Qwopus3.5-27B-v3`
-  - 所有基于 Qwen2/2.5/3.5 的 27B+ 衍生模型。
+  - 所有基于 Qwen2/2.5/3.5 的 27B+ 稠密衍生模型。
 
 ---
 
@@ -73,8 +78,8 @@ cmake --build build --config Release -j $(nproc) --target llama-server
 
 | 参数 | 建议值 | 说明与优势 |
 | :--- | :--- | :--- |
-| **`-ctk`** | `tbqp3` / `tbqp4` | **TurboQuant Key 缓存量化**。`tbqp` 包含 QJL 优化，3-bit 可节省约 75% KV 显存。 |
-| **`-ctv`** | `tbq3` / `tbq4` | **TurboQuant Value 缓存量化**。配合 `-ctk` 使用，大幅降低显存压力。 |
+| **`-ctk`** | `turbo3_tcq` | **TurboQuant Key 缓存量化**。`turbo3_tcq` 包含 QJL 优化，3-bit 可节省约 75% KV 显存。 |
+| **`-ctv`** | `turbo3` | **TurboQuant Value 缓存量化**。配合 `-ctk` 使用，大幅降低显存压力。 |
 | **`--spec-type`** | `dflash` | **启用 DFlash 投机引擎**。利用专用的 Draft 模型预测 Token，在不损失精度的前提下显著提升推理 TPS。 |
 | **`-md`** | `draft.gguf` | **指定 Draft 模型**。需配合 `--spec-type dflash` 使用。 |
 
@@ -82,29 +87,27 @@ cmake --build build --config Release -j $(nproc) --target llama-server
 
 #### 💡 极客极限配置示例 (Ultimate Geek Examples)
 
-##### 🌟【终极方案】Gemma-4-31B 满血全量：256K 极限上下文 + DFlash 加速
+##### 🌟【终极方案】Gemma-4-31B 满血全量：128K 极限上下文 + TQ 压缩
+注意：Gemma 4 验证重点为 TurboQuant 显存节省，暂不建议配合 DFlash 使用。
+
 ```bash
 ./build/bin/llama-server \
     -m models/gemma-4-31b-it-UD-IQ3_XXS.gguf \
-    -md models/gemma-4-dflash-draft.gguf \
-    --spec-type dflash \
-    -c 262144 -b 2048 -ub 1024 -ngl 99 -fa \
-    -ctk tbqp3 -ctv tbq3 \
+    -ngl 99 -fa on -c 128000 \
+    -ctk turbo3_tcq -ctv turbo3 \
     --port 1337
 ```
 
-##### 💎【纯净 TQ】Qwen3.5-27B-UD-IQ3_XXS：最强 KV 压缩方案
-这是专门为 TurboQuant 优化的纯净配置，适用于需要极致显存节省的场景。
+##### 💎【全能加速】Qwen3.5-27B：DFlash + TurboQuant 混合模式
+这是性能最均衡的配置，同时享受显存压缩与投机采样加速。
 
 ```bash
 ./build/bin/llama-server \
     -m models/Qwen3.5-27B-UD-IQ3_XXS.gguf \
-    -ngl 99 \
-    -fa on \
-    -c 12800 \
-    -b 512 \
-    -ctk turbo3_tcq \
-    -ctv turbo3_tcq \
+    -md models/dflash-draft-q4_k_m.gguf \
+    --spec-type dflash \
+    -ngl 99 -fa on -c 32768 -b 512 \
+    -ctk turbo3_tcq -ctv turbo3 \
     --port 1337
 ```
 
